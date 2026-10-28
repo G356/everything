@@ -16,6 +16,21 @@ function checkNamedContent(name, content) {
 }
 
 /**
+ * A serializer for one layout of a document (its body and page stories): each object it is given, such as
+ * the styles or the list definitions, is serialized once however many keys read it. Objects must not
+ * change while the layout runs; a new layout takes a new serializer.
+ */
+export function layoutSerializer() {
+  const serialized = new Map();
+  return value => {
+    if (!value || typeof value !== 'object') return JSON.stringify(value ?? null);
+    let text = serialized.get(value);
+    if (text === undefined) serialized.set(value, text = JSON.stringify(value));
+    return text;
+  };
+}
+
+/**
  * Page stories as layout keys them: the session's version of their content (StorySession
  * pageStories) when it has one, so an edit to the body does not serialize every story again.
  */
@@ -34,10 +49,13 @@ export function storyContentKey(pageStories, path, ...numbering) {
 /**
  * What a story measurement reads besides the measurer, as text. Every page of a long document lays
  * its header, footer and notes out again on each edit, mostly unchanged. A layout serializes its
- * styles once (`stylesKey`) and each story's paragraphs once (`storyKeys`, by paragraphs array), or
- * names a versioned story's content (`contentKey`, storyContentKey) without serializing it.
+ * styles (`stylesKey`) and list definitions (`numberingKey`) once and each story's paragraphs once
+ * (`storyKeys`, by paragraphs array), or names a versioned story's content (`contentKey`,
+ * storyContentKey) without serializing it. The key names the long parts by the cache's short ids:
+ * a document with hundreds of lists serialized half a megabyte of list definitions into the key of
+ * every page's header and footer on each keystroke, and hashed each key again to look it up.
  */
-function storyMeasureKey(cache, story, geometry, numbering, context, { styles, drawingLayouts, onUnsupported, stylesKey, storyKeys, contentKey }) {
+function storyMeasureKey(cache, story, geometry, numbering, context, { styles, drawingLayouts, onUnsupported, stylesKey, numberingKey, storyKeys, contentKey }) {
   let content;
   if (contentKey !== undefined) { checkNamedContent(contentKey, story); content = cache.intern(contentKey); }
   else {
@@ -45,8 +63,11 @@ function storyMeasureKey(cache, story, geometry, numbering, context, { styles, d
     if (paragraphs === undefined) { paragraphs = cache.intern(JSON.stringify(story.paragraphs)); storyKeys?.set(story.paragraphs, paragraphs); }
     content = [paragraphs, { ...story, paragraphs: undefined }];
   }
+  // The page's number and counts reach the story only through its page fields (measureStory): a story
+  // without one measures alike on every page, so a long document measures it once, not once a page.
+  const pageContext = story.paragraphs.some(p => p.runs.some(r => r.field)) ? context : null;
   // Of the revision view, only what the story's own changes and hidden text show (revisionViewKey).
-  return JSON.stringify([content, geometry, numbering ?? null, context, revisionViewKey(story.paragraphs, true),
+  return JSON.stringify([content, geometry, cache.intern(numberingKey ?? JSON.stringify(numbering ?? null)), pageContext, revisionViewKey(story.paragraphs, true),
     styles ? cache.intern(stylesKey ?? JSON.stringify(styles)) : null, drawingLayouts ? [...drawingLayouts] : null, !!onUnsupported]);
 }
 

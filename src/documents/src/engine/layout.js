@@ -12,7 +12,7 @@ import { paginateColumnWidths } from './unequal-columns.js';
 import { sectionColumnIntervals } from './section-columns.js';
 import { columnFlowPage, placeColumnFlow, columnAtPoint } from './column-layout.js';
 import { flatLineContains, flatLineRect } from './flat-drawing-lines.js';
-import { canvasFontFamily, textFontStyle } from './font-families.js';
+import { canvasFontFamily, fontSlot, textFontStyle } from './font-families.js';
 import { pageGeometry, readingPageGeometry } from './page-settings.js';
 import { layoutParagraphBorders } from './paragraph-border-layout.js';
 import { layoutTableBorders, tableRowBorderWidths, tableBorderWidth, cellBorderLayoutWidth, tableHorizontalInsets } from './table-border-layout.js';
@@ -62,6 +62,8 @@ const RTL_SCRIPTS = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]|[\u{10800}-\u{10f
 const strongRtl = text => RTL_SCRIPTS.test(text) && [...text].some(c => RTL_SCRIPTS.test(c) && ['R', 'AL'].includes(bidiCharacterType(c)));
 export const PAGE = Object.freeze({ width: 816, height: 1056, margin: 96, gap: 24, lineHeight: 26, paragraphGap: 12, fontSize: 16 });
 export const MAX_PAGES = 200;
+// Each paragraph's cache key strings from the last layout that read it (layoutPass contentKeys).
+const earlierParagraphKeys = new WeakMap();
 export const font = style => `${style.italic ? 'italic' : 'normal'} ${style.bold ? 700 : 400} ${(style.fontSize ?? 12) * 4 / 3}px ${canvasFontFamily(style)}`;
 
 /** Layout is independent of the painter. Every caret and fragment maps to UTF-16 source offsets. */
@@ -135,13 +137,18 @@ function layoutDocumentContent(paragraphs, measureBase, page, numbering, tables,
   const numberNotes = () => numberedParagraphs(source, { footnote: notes?.numbers || new Map(), endnote: endnotes?.numbers || new Map() });
   if (notes || endnotes) paragraphs = numberNotes();
   const visited = new Set();
+  // The styles and list definitions are long and the same throughout this layout: every pass, page story
+  // and cache key of it reads one serialization of each (page-story-measure.js, layoutPass).
+  const cache = measureBase.paragraphCache?.();
+  const serialize = storyOptions.serialize || (value => JSON.stringify(value ?? null));
+  const storyStylesKey = cache && serialize(storyOptions.styles), storyNumberingKey = cache && serialize(numbering);
   for (let attempt = 0; attempt < MAX_PAGES; attempt++) {
     // Page counts reach the body only through the header and footer heights they produce.
     const storyHeights = totals ? new Map() : undefined, storyHeightCache = new Map(), paragraphKeys = new WeakMap();
     // Page stories measured by this layout share one serialization of the styles and of each story (page-story-measure.js).
-    const storyScope = measureBase.paragraphCache ? { storyStylesKey: JSON.stringify(storyOptions.styles ?? null), storyKeys: new WeakMap(), storyStories: pageStories } : {};
+    const storyScope = cache ? { storyStylesKey, storyNumberingKey, storyKeys: new WeakMap(), storyStories: pageStories } : {};
     // Everything besides the blocks that decides where footnote references land and how tall their notes are.
-    const flowContext = () => measureBase.paragraphCache && JSON.stringify([counts, storiesContentKey(pageStories), storyOptions.styles ?? null, numbering ?? null, !!storyOptions.bestEffort,
+    const flowContext = () => cache && JSON.stringify([counts, storiesContentKey(pageStories), cache.intern(storyStylesKey), cache.intern(storyNumberingKey), !!storyOptions.bestEffort,
       storyOptions.drawingLayouts ? [...storyOptions.drawingLayouts] : null, revisionViewKey(Object.values(pageStories?.stories || {}).flatMap(story => story.paragraphs || []), true)]);
     const flow = () => notes
       ? layoutWithFootnotes(notes, noteReserve => layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...storyScope, ...counts, storyHeights, storyHeightCache, paragraphKeys, noteReserve }), measureBase, numbering, { ...storyOptions, ...storyScope }, flowContext())
@@ -200,7 +207,7 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
   const paragraphCache = measureBase.paragraphCache?.();
   paragraphCache?.reserve(paragraphs.length);
   // Page geometry and numbering are long; keys name them by the cache's short ids (intern).
-  const pageKeys = new WeakMap(), sharedKey = paragraphCache && paragraphCache.intern(JSON.stringify(numbering ?? null));
+  const pageKeys = new WeakMap(), sharedKey = paragraphCache && paragraphCache.intern(storyOptions.storyNumberingKey ?? JSON.stringify(numbering ?? null));
   // Paragraphs keep their content through the passes of one layout; serialize each once. A paragraph's
   // content includes what its measurement reads of the revision view (revisionViewKey), not the whole view.
   const paragraphKeys = storyOptions.paragraphKeys || new WeakMap();
@@ -208,7 +215,13 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
     let keys = paragraphKeys.get(paragraph);
     if (!keys) {
       const view = revisionViewKey([paragraph]);
-      paragraphKeys.set(paragraph, keys = { content: view ? `${JSON.stringify(paragraph)},${JSON.stringify(view)}` : JSON.stringify(paragraph), byContext: new Map() });
+      const content = view ? `${JSON.stringify(paragraph)},${JSON.stringify(view)}` : JSON.stringify(paragraph);
+      // An unchanged paragraph keeps the key strings of earlier layouts, whose hashes are known: looking up
+      // every paragraph of a long document by new strings hashed megabytes of text on each keystroke.
+      const earlier = earlierParagraphKeys.get(paragraph);
+      keys = earlier?.content === content && earlier.byContext.size < 16 ? earlier : { content, byContext: new Map() };
+      earlierParagraphKeys.set(paragraph, keys);
+      paragraphKeys.set(paragraph, keys);
     }
     return keys;
   };
@@ -840,6 +853,17 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
   let chars = [];
   // Segment the whole paragraph, so a grapheme spanning two format runs stays intact.
   let runIndex = 0, runEnd = p.runs[0]?.text.length ?? 0, styleIndex = -1, runStyle, runHidden = false;
+  // A run's characters share one style object per font slot (textFontStyle reads only the slot of the
+  // text), rather than each copying the whole run format.
+  let slotStyles = new Map(), markFormat;
+  // Every line reads the paragraph mark's format; normalize it once.
+  const markRunFormat = () => markFormat ??= runFormat(p.markFormat);
+  const charStyle = text => {
+    const slot = fontSlot(text, runStyle);
+    let style = slotStyles.get(slot);
+    if (!style) slotStyles.set(slot, style = textFontStyle(text, runStyle));
+    return style;
+  };
   const wordBreaks = dictionaryBreaks(text);
   for (const s of inlineSegments(text)) {
     while (s.index >= runEnd && runIndex < p.runs.length - 1) runEnd += p.runs[++runIndex].text.length;
@@ -855,13 +879,20 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
       const display = runRevisionDisplay(p.runs[runIndex]);
       if (display?.hidden) runHidden = true; else if (display) Object.assign(runStyle, display);
       styleIndex = runIndex;
+      slotStyles = new Map();
     }
     // Inline page/column breaks in cell XML are retained but have no
     // advance or pagination effect. Keep source offsets for editing and undo.
     const ignoredCellBreak = runHidden || !!p.cellId && (s.segment === '\f' || s.segment === '\u000e');
     const noBreakHyphen = !!p.runs[runIndex]?.noBreakHyphen;
     const displayText = inlineDisplayText(p.runs[runIndex], s.segment);
-    chars.push({ text: ignoredCellBreak ? '' : displayText, ignoredCellBreak, ...(noBreakHyphen ? { noBreakHyphen: true } : {}), ...(wordBreaks?.has(s.index + s.segment.length) ? { wordBreak: true } : {}), breakClear: p.runs[runIndex]?.breakClear, start: documentOffset + s.index, end: documentOffset + s.index + s.segment.length, style: textFontStyle(displayText, runStyle), image: runHidden ? undefined : p.runs[runIndex]?.image, positionalTab: p.runs[runIndex]?.positionalTab });
+    // Assigned in order rather than spread from optional parts: this runs for every character.
+    const c = { text: ignoredCellBreak ? '' : displayText, ignoredCellBreak };
+    if (noBreakHyphen) c.noBreakHyphen = true;
+    if (wordBreaks?.has(s.index + s.segment.length)) c.wordBreak = true;
+    c.breakClear = p.runs[runIndex]?.breakClear; c.start = documentOffset + s.index; c.end = documentOffset + s.index + s.segment.length;
+    c.style = charStyle(displayText); c.image = runHidden ? undefined : p.runs[runIndex]?.image; c.positionalTab = p.runs[runIndex]?.positionalTab;
+    chars.push(c);
   }
   // Active RTL import/editing remains guarded while interaction is verified. Hebrew or Arabic typed
   // into an ordinary run (no w:rtl) is still right-to-left text (UAX #9): it is ordered by the same
@@ -879,7 +910,7 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
     if (columnPage.columnWidthAt && !cellBounds) page = { ...columnPage, right: columnPage.width-columnPage.left-columnPage.columnWidthAt(chars[start]?.start ?? documentOffset+text.length) };
     if (!row) row = squareRow(wrapHints, p.id, lines.length, paragraphEdges(format, page, start <= firstIndentedStart), page, 0, format.spaceBefore * 4 / 3, clearance);
     const edges = row.intervals[pieceIndex], right = edges.right;
-    const { left, marker } = markerGeometry(start === 0 ? listMarker : null, runFormat(p.markFormat), edges.left, right, format, page, measure, documentOffset);
+    const { left, marker } = markerGeometry(start === 0 ? listMarker : null, markRunFormat(), edges.left, right, format, page, measure, documentOffset);
     const available = right - left;
     const scanner = new LineBuilder(left, right, format, page, measure, chars[start]?.start ?? documentOffset + text.length);
     let end = start, lastBreak = -1, contraction = null, visibleItems = 0, oversizedInline = false;
@@ -956,7 +987,8 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
     // A forced break inside an overlong Thai or Lao word keeps vowels with their consonant.
     else if (end < chars.length && !oversizedInline) while (end - 1 > start && splitsSyllable(chars[end - 1].text, chars[end].text)) end--;
     const softBreak = !oversizedInline && end < chars.length && !['\v', '\f', '\u000e'].includes(chars[end].text) && chars[end - 1]?.text === '\u00ad' && end === lastBreak;
-    let span = chars.slice(start, end);
+    const scanned = chars.slice(start, end);
+    let span = scanned;
     if (softBreak) span[span.length - 1] = { ...span.at(-1), text: '-', discretionaryHyphen: true };
     if (autoHyphen !== null) span.push(hyphenCharacter(chars[end - 1]));
     hyphenatedLines = softBreak || autoHyphen !== null ? hyphenatedLines + 1 : 0;
@@ -966,13 +998,17 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
     const virtual = emptySectionBoundary && !keepBoundaryLine || start === chars.length && chars.at(-1)?.text === '\f' && !page.splitPgBreakAndParaMark;
     const hardBreak = chars[end]?.text === '\f' ? 'page' : chars[end]?.text === '\v' ? 'line' : chars[end]?.text === '\u000e' ? 'column' : null;
     const offset = chars[start]?.start ?? documentOffset + text.length;
-    const builder = new LineBuilder(left, right, format, page, measure, offset);
-    for (const c of span) builder.add(c);
+    // A line that ends the paragraph is what the scanner built when it ran out of characters: it
+    // added exactly this span, in order, with the same geometry. Building it again only repeats
+    // every measurement (most paragraphs are one line).
+    const reuse = end === chars.length && !contraction && !softBreak && autoHyphen === null && span === scanned;
+    const builder = reuse ? scanner : new LineBuilder(left, right, format, page, measure, offset);
+    if (!reuse) for (const c of span) builder.add(c);
     const pageBreakWithMark = hardBreak === 'page' && end === chars.length - 1 && !page.splitPgBreakAndParaMark;
     // A terminal page break sharing the paragraph mark takes that mark's
     // metrics, not the break run's font. Visible text still contributes its
     // own metrics. Manual line breaks and split page breaks remain distinct.
-    const markStyle = end === chars.length || pageBreakWithMark ? runFormat(p.markFormat) : hardBreak ? chars[end].style : null;
+    const markStyle = end === chars.length || pageBreakWithMark ? markRunFormat() : hardBreak ? chars[end].style : null;
     // Terminal-mark and manual-line-break metrics are ignored on text lines.
     // Blank lines retain their own mark/break formatting, including when the
     // two have different fonts. Page and column breaks have separate rules.
