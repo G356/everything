@@ -3,6 +3,7 @@ import { iconEl } from '../ui/icons.js';
 import { engineApi } from '../lib/engine-api.js';
 import { wordsToCheck, proofingText, loadSpeller } from '../lib/spelling.js';
 import { proofingFingerprint, wordsInSavedRanges } from '../lib/proofing-cache.js';
+import { autocorrectEnabled } from '../lib/autocorrect.js';
 
 const ENABLED_KEY = 'documents:spellcheck';
 const LIMIT = 3000; // Past this many, a word processor stops marking and says so.
@@ -16,6 +17,29 @@ export const spellingEnabled = () => { try { return localStorage.getItem(ENABLED
 export function createProofing({ editor, pkg, error, onState = () => {} }) {
   let enabled = spellingEnabled();
   const ignored = new Set(), ignoredOnce = new Set();
+  // Ignore Once marks one occurrence by where it starts in the body text `ignoredText`. Text typed or deleted
+  // before it moves it: the marks follow the edit, so the occurrence stays ignored (and no other takes its place).
+  let ignoredText = null;
+  function followIgnored(text) {
+    const old = ignoredText;
+    ignoredText = text;
+    if (old === null || old === text || !ignoredOnce.size) return;
+    const shortest = Math.min(old.length, text.length);
+    let prefix = 0, suffix = 0;
+    while (prefix < shortest && old.charCodeAt(prefix) === text.charCodeAt(prefix)) prefix++;
+    while (suffix < shortest - prefix && old.charCodeAt(old.length - 1 - suffix) === text.charCodeAt(text.length - 1 - suffix)) suffix++;
+    const moved = [];
+    for (const key of ignoredOnce) {
+      const colon = key.indexOf(':'), start = Number(key.slice(0, colon)), word = key.slice(colon + 1);
+      // An edit inside the word ends the choice: it is another word now.
+      if (start + word.length <= prefix) moved.push(key);
+      else if (start >= old.length - suffix) moved.push(`${start + text.length - old.length}:${word}`);
+    }
+    ignoredOnce.clear();
+    for (const key of moved) ignoredOnce.add(key);
+  }
+  /** Ignore misspelling `m` of the latest check here only. */
+  function ignoreHere(m) { followIgnored(results.text); ignoredOnce.add(`${m.start}:${m.word}`); }
   const known = new Map();
   let results = { revision: -1, text: '', misspelled: [], overflow: false };
   let timer = null, speller = null, failure = null, typedAt = -1;
@@ -52,6 +76,7 @@ export function createProofing({ editor, pkg, error, onState = () => {} }) {
     const caret = engine.session.path === null && engine.model.range[0] === engine.model.range[1] ? engine.model.range[0] : -1;
     const misspelled = [];
     let overflow = false, skipped = null;
+    followIgnored(text);
     const words = saved && !saved.ranges.length ? [] : wordsToCheck(proofingText(text, body.paragraphs));
     for (const word of saved ? wordsInSavedRanges(words, saved.ranges) : words) {
       if (ignored.has(word.word) || ignoredOnce.has(`${word.start}:${word.word}`)) continue;
@@ -131,12 +156,15 @@ export function createProofing({ editor, pkg, error, onState = () => {} }) {
     const engine = engineReady(); if (!engine || !editable()) return false;
     engine.finishComposition();
     if (engine.session.path !== null) engine.editStory(null);
+    followIgnored(engine.session.body.text);
     const targets = occurrences(word).filter(m => !ignoredOnce.has(`${m.start}:${m.word}`)).reverse();
     if (!targets.length) return false;
     const ok = engine.execute(() => { for (const m of targets) { engine.model.select(m.wordStart ?? m.start, m.wordEnd ?? m.end); engine.model.replace(text); } });
     schedule(0);
     return ok;
   }
+  // A contraction is offered with the apostrophe typing gives: the typographic one while autocorrect makes quotes so.
+  const suggestionsFor = word => speller.suggest(word).map(option => autocorrectEnabled() ? option.replaceAll("'", '’') : option);
   function ignoreAll(word) { ignored.add(word); schedule(0); }
   function addToDictionary(word) { speller?.add(word); known.set(word, true); schedule(0); }
 
@@ -161,7 +189,7 @@ export function createProofing({ editor, pkg, error, onState = () => {} }) {
     replaceAll(current.word, choice);
     queueMicrotask(() => next(at ? at.start : current.start));
   });
-  const ignoreOnce = button('Ignore Once', () => { if (!current) return; ignoredOnce.add(`${current.start}:${current.word}`); next(current.end); });
+  const ignoreOnce = button('Ignore Once', () => { if (!current) return; ignoreHere(current); next(current.end); });
   const ignoreAllButton = button('Ignore All', () => { if (!current) return; ignoreAll(current.word); next(current.end); });
   const add = button('Add to Dictionary', () => { if (!current) return; addToDictionary(current.word); next(current.end); });
   const actions = el('div.ed-proof-actions', {}, change, changeAll, ignoreOnce, ignoreAllButton, add);
@@ -189,7 +217,7 @@ export function createProofing({ editor, pkg, error, onState = () => {} }) {
     engine.model.select(current.start, current.end); engine.syncInput?.(); engine.paint(); engine.revealCaret(); engine.onSelection?.();
     const text = results.text, lineStart = Math.max(text.lastIndexOf('\n', current.start) + 1, current.start - 60), lineEnd = Math.min(...[text.indexOf('\n', current.end), current.end + 60].filter(n => n >= 0));
     context.replaceChildren((lineStart > 0 && text[lineStart - 1] !== '\n' ? '…' : '') + text.slice(lineStart, current.start), el('mark', {}, text.slice(current.start, current.end)), text.slice(current.end, lineEnd));
-    const options = speller.suggest(current.word);
+    const options = suggestionsFor(current.word);
     suggestions.replaceChildren(...(options.length ? options : ['(no suggestions)']).map((option, i) => {
       const item = el('button.ed-proof-suggestion', { type: 'button', role: 'option', 'aria-selected': String(!i && !!options.length), dataset: { value: options.length ? option : '' }, disabled: !options.length,
         onclick: () => chooseSuggestion(item),
@@ -241,7 +269,7 @@ export function createProofing({ editor, pkg, error, onState = () => {} }) {
     menuItems(position) {
       const m = enabled && !pkg()?.hideSpellingErrors && engineReady()?.session.path === null ? misspellingAt(position) : null;
       if (!m || !speller) return [];
-      const options = speller.suggest(m.word).slice(0, 5);
+      const options = suggestionsFor(m.word).slice(0, 5);
       return [
         ...(options.length ? options.map(option => ({ label: option, labelStyle: { fontWeight: '600' }, disabled: !editable(), onSelect: () => replaceWord(m, option) })) : [{ label: '(no spelling suggestions)', disabled: true }]),
         { separator: true },
@@ -259,10 +287,10 @@ export function createProofing({ editor, pkg, error, onState = () => {} }) {
       await check();
       return results.misspelled.filter(m => !ignoredOnce.has(`${m.start}:${m.word}`));
     },
-    suggest(word) { return speller?.suggest(word) || []; },
+    suggest(word) { return speller ? suggestionsFor(word) : []; },
     change(m, text) { return replaceWord(m, text); },
     changeAll(word, text) { return replaceAll(word, text); },
-    ignoreOnce(m) { ignoredOnce.add(`${m.start}:${m.word}`); schedule(0); },
+    ignoreOnce(m) { ignoreHere(m); schedule(0); },
     ignoreAll, addToDictionary,
     /** Forget Ignore and Ignore All choices for this session (Reset Ignored Words). */
     resetIgnored() { ignored.clear(); ignoredOnce.clear(); known.clear(); rechecked = true; schedule(0); onState(); },

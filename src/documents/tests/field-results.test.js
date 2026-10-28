@@ -66,7 +66,9 @@ describe('field evaluation', () => {
     expect(fieldInstruction({ name: 'DOCPROPERTY', argument: 'Company', format: 'Upper', preserve: false })).toBe(' DOCPROPERTY Company \\* Upper ');
   });
   it('reads core and extended properties', () => {
-    const parts = { 'docProps/core.xml': strToU8('<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>T</dc:title><dc:creator>A</dc:creator></cp:coreProperties>'), 'docProps/app.xml': strToU8('<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Company>C</Company></Properties>') };
+    const parts = { 'docProps/core.xml': strToU8('<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>T</dc:title><dc:creator>A</dc:creator></cp:coreProperties>'), 'docProps/app.xml': strToU8('<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Company>C</Company></Properties>') ,
+      // Core properties are the part the package relationship names (Part 2 §11).
+      '_rels/.rels': strToU8('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="c" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>') };
     expect(documentProperties(parts)).toMatchObject({ title: 'T', author: 'A', company: 'C' });
   });
 });
@@ -158,4 +160,23 @@ it('inserts DATE and AUTHOR fields that save as fields, reopen editable and upda
   updateSequenceFields(again);
   expect(again.text).toBe('Signed on October 3, 2026 by Ada Byron.');
   setFieldContextProvider(null);
+});
+
+it('gives a PAGE field the page\'s number in its section\'s format, which a number switch overrides', () => {
+  expect(evaluateField(' PAGE ', {})).toBeNull();
+  expect(evaluateField(fieldInstruction({ name: 'PAGE' }), { page: 2 })).toBe('2');
+  expect(evaluateField(fieldInstruction({ name: 'PAGE' }), { page: 2, pageFormat: 'lowerRoman' })).toBe('ii');
+  expect(evaluateField(fieldInstruction({ name: 'PAGE', format: 'ROMAN' }), { page: 4 })).toBe('IV');
+  expect(evaluateField(fieldInstruction({ name: 'PAGE', format: 'Arabic' }), { page: 4, pageFormat: 'upperRoman' })).toBe('4');
+  expect(evaluateField(fieldInstruction({ name: 'PAGE', format: 'alphabetic' }), { page: 28, pageFormat: 'upperRoman' })).toBe('bb');
+  expect(evaluateField(' PAGE \\* roman \\* Upper ', { page: 3 })).toBe('III');
+});
+
+it('leaves a body PAGE field\'s number alone when fields update', () => {
+  const { doc } = blank();
+  doc.replace('On page ');
+  insertBodyField(doc, fieldInstruction({ name: 'PAGE' }), '7');
+  setFieldContextProvider(() => ({ now: when, page: 1, pages: 9 }));
+  try { updateSequenceFields(doc); } finally { setFieldContextProvider(null); }
+  expect(doc.text).toBe('On page 7');
 });

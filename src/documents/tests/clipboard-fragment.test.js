@@ -37,7 +37,7 @@ it('pastes Word\'s tabs and runs of spaces as a tab and spaces, not no-break spa
 it('marks headings and nested lists, and keeps a lone phrase in the destination paragraph', () => {
   const fragment = htmlFragment('<h3>Title</h3><ol><li>One<ul><li>Inner</li></ul></li></ol>');
   expect(fragment.paragraphs.map(p => [p.text, p.styleName, p.list, p.mark])).toEqual([
-    ['Title', 'Heading 3', null, true], ['One', 'Normal', { kind: 'number', level: 0 }, true], ['Inner', 'Normal', { kind: 'bullet', level: 1 }, true]]);
+    ['Title', 'Heading 3', null, true], ['One', 'Normal', { kind: 'number', level: 0, id: 1 }, true], ['Inner', 'Normal', { kind: 'bullet', level: 1, id: 2 }, true]]);
   expect(htmlFragment('<p>Just a <b>phrase</b></p>').paragraphs[0].mark).toBe(false);
 });
 
@@ -91,4 +91,26 @@ it('writes tel: and mailto: links into the copied HTML, and never unsafe schemes
     runs: [run('Call', 'tel:+1-555-0100'), run(' mail', 'mailto:a@example.com'), run(' bad', 'javascript:alert(1)'), run(' data', 'data:text/html,x')] }] });
   const anchors = [...new DOMParser().parseFromString(html, 'text/html').querySelectorAll('a')].map(a => [a.textContent, a.getAttribute('href')]);
   expect(anchors).toEqual([['Call', 'tel:+1-555-0100'], [' mail', 'mailto:a@example.com']]);
+});
+
+it('keeps a link whose address has spaces or line breaks around it, as a browser follows it', () => {
+  const links = html => htmlFragment(html)?.paragraphs.flatMap(p => p.runs.filter(r => r.link).map(r => [r.text, r.link]));
+  expect(links('<p>See <a href=" https://example.com/a ">the site</a>.</p>')).toEqual([['the site', 'https://example.com/a']]);
+  expect(links('<p><a href="\n\tmailto:someone@example.com\n">Write</a></p>')).toEqual([['Write', 'mailto:someone@example.com']]);
+  // An address that is not a web, mail or phone link still gives no link.
+  expect(links('<p><a href=" javascript:alert(1)">No</a></p>')).toEqual([]);
+});
+
+it('keeps a table row on one line when its cells hold paragraphs, as Word, LibreOffice and Google Docs write them', () => {
+  expect(texts('<table><tr><td><p class="MsoNormal">Name</p></td><td><p class="MsoNormal">Qty</p></td></tr><tr><td><p>Apples</p></td><td><p>3</p></td></tr></table>')).toEqual(['Name\tQty', 'Apples\t3']);
+  expect(texts('<table><tbody><tr><td><p dir="ltr"><span>Item</span></p></td><td><div>Two</div><div>lines</div></td></tr></tbody></table><p>After</p>')).toEqual(['Item\tTwo lines', 'After']);
+  expect(texts('<table><tr><th><h3>Head</h3></th><td>Plain</td></tr></table>')).toEqual(['Head\tPlain']);
+});
+
+it('keeps the emphasis a span inherits when its style says inherit, as a reset style sheet makes it say', () => {
+  const runs = html => htmlFragment(html)?.paragraphs.flatMap(p => p.runs.map(r => [r.text, !!r.format.bold, !!r.format.italic]));
+  expect(runs('<p><b>Bold <span style="font-weight:inherit">word</span></b> <i>Slanted <span style="font-style:unset">word</span></i></p>'))
+    .toEqual([['Bold word', true, false], [' ', false, false], ['Slanted word', false, true]]);
+  // A weight or style of its own still counts.
+  expect(runs('<p><b>Bold <span style="font-weight:normal">plain</span></b></p>')).toEqual([['Bold ', true, false], ['plain', false, false]]);
 });

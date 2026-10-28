@@ -1,3 +1,4 @@
+import { readVmlWatermark, watermarkImagePart } from './vml-watermarks.js';
 import { writeTableStyleDefinition } from './docx-table-styles.js';
 import { MAX_DOCUMENT_CHARACTERS, DOCUMENT_CHARACTER_LIMIT_MESSAGE } from './text-limits.js';
 import { rejectFormatChange } from './revisions.js';
@@ -43,7 +44,6 @@ import { shapeHasFields } from './shape-page-fields.js';
 import { controlSignature, controlContentSignature, contentControlRanges, changedContentControls } from './content-controls.js';
 import { MC, alternateBranch, activeDescendants, serializeFragment, bindUsedNamespaces } from './docx-compatibility.js';
 import { readParagraphBorders, writeParagraphBorders } from './docx-paragraph-borders.js';
-import { checkJustificationText } from './justification.js';
 import { readParagraphShading, writeParagraphShading } from './docx-paragraph-shading.js';
 import { hyperlinkReader, hyperlinkWriter, bindHyperlinkNamespaces } from './docx-hyperlinks.js';
 import { hyperlinkBoundaryChanges } from './hyperlinks.js';
@@ -62,7 +62,7 @@ import { underlinePattern } from './underlines.js';
 import { readCapitalization } from './docx-capitalization.js';
 import { checkedCapitalization, resolveCapitalization, capitalizationDeclarations } from './capitalization.js';
 import { readStrike } from './docx-strikethrough.js';
-import { checkedStrike, resolveStrike } from './strikethrough.js';
+import { checkedStrike, resolveStrike, strikeDeclarations } from './strikethrough.js';
 import { readLigatures, writeLigatures, readOpenTypeFeatures } from './ligatures.js';
 import { readKerning } from './docx-kerning.js';
 import { readContextualFlag } from './docx-contextual-spacing.js';
@@ -78,11 +78,11 @@ import { colorReader } from './docx-colors.js';
 import { readTable, writeTable } from './docx-tables.js';
 import { imageReader, imageWriter, bindImageNamespaces, WP } from './docx-images.js';
 import { resizedPictureShell } from './picture-resize.js';
-import { OBJECT } from './images.js';
+import { OBJECT, imageInfo } from './images.js';
 import { isPageBasedCellPosition, isCellRelativePosition } from './positioned-images.js';
 import { documentBlocks } from './tables.js';
-import { emptyStyles, resolveStyledParagraph, resolveCharacterRun, styleProperties, paragraphRunStyle, styleRun } from './styles.js';
-import { resolvedFormat, geometryPatch, checkedRunFormat, PARAGRAPH_FLAGS } from './formatting.js';
+import { emptyStyles, resolveStyledParagraph, resolveCharacterRun, styleProperties, paragraphRunStyle, styleRun, characterUnit } from './styles.js';
+import { resolvedFormat, geometryPatch, checkedRunFormat, PARAGRAPH_FLAGS, characterIndent } from './formatting.js';
 import { levelParagraphPatch } from './numbering-paragraph.js';
 import { UnsupportedDocumentError } from './errors.js';
 export { UnsupportedDocumentError } from './errors.js';
@@ -92,7 +92,9 @@ import { readNumbering, writeNumbering } from './docx-numbering.js';
 import { validateIndent, normalizeTabStops } from './paragraph-geometry.js';
 import { DEFAULT_PAGE_SETTINGS, validatePageSettings } from './page-settings.js';
 import { checkedLineNumbers } from './line-number-settings.js';
-import { zipPackage, MAX_PACKAGE_BYTES } from './package-part-paths.js';
+import { zipPackage, MAX_PACKAGE_BYTES, compoundFileProblem, relationshipPartPath, partPathForUrl } from './package-part-paths.js';
+import { canonicalMainPart } from './docx-main-part.js';
+import { altChunkParagraphs } from './docx-alt-chunks.js';
 import { unzipSync, strToU8 } from 'fflate';
 import { paragraph, paragraphFormat, runFormat, documentText, paragraphText, PAGINATION_DEFAULTS } from './model.js';
 
@@ -251,10 +253,17 @@ function writeParagraphFormat(node, p, make, numbering) {
     for (const [key, physical, logical] of [['indentLeft', 'left', 'start'], ['indentRight', 'right', 'end']]) if (key in patch) {
       // Both spellings keep the override effective for older and newer consumers.
       for (const name of [physical, logical]) ind.setAttributeNS(W, `w:${name}`, String(format[key]));
+      // A character-unit form (§17.3.1.12), declared here or inherited, would override the twips; zero turns it off.
+      if (format.characterIndents?.includes(key) || ind.hasAttributeNS(W, physical + 'Chars') || ind.hasAttributeNS(W, logical + 'Chars')) {
+        ind.setAttributeNS(W, `w:${physical}Chars`, '0');
+        if (ind.hasAttributeNS(W, logical + 'Chars')) ind.setAttributeNS(W, `w:${logical}Chars`, '0');
+      }
     }
     if ('firstLine' in patch) {
-      for (const name of ['firstLine', 'hanging']) ind.removeAttributeNS(W, name);
+      const characters = format.characterIndents?.includes('firstLine') || ['firstLineChars', 'hangingChars'].some(name => ind.hasAttributeNS(W, name));
+      for (const name of ['firstLine', 'hanging', 'firstLineChars', 'hangingChars']) ind.removeAttributeNS(W, name);
       ind.setAttributeNS(W, format.firstLine < 0 ? 'w:hanging' : 'w:firstLine', String(Math.abs(format.firstLine)));
+      if (characters) ind.setAttributeNS(W, format.firstLine < 0 ? 'w:hangingChars' : 'w:firstLineChars', '0');
     }
   }
   if ('tabs' in patch) {
@@ -357,11 +366,13 @@ function writeRunFormat(properties, patch, make, inheritedStrike = 'none', inher
   if ('strikethrough' in patch) {
     properties ||= make('rPr');
     const mode = patch.strikethrough, base = inheritedStrike === 'double' ? 'double' : 'single';
-    const kind = mode === 'none' ? base : mode.startsWith('double') ? 'double' : 'single';
     for (const tag of ['strike', 'dstrike']) for (const n of children(properties)) if (n.namespaceURI === W && n.localName === tag) n.remove();
-    const tag = kind === 'single' ? 'strike' : 'dstrike', node = make(tag);
-    node.setAttributeNS(W, 'w:val', mode === 'single' || mode === 'double' ? '1' : '0');
-    properties.insertBefore(node, children(properties).find(n => runOrder.indexOf(n.localName) > runOrder.indexOf(tag)) || null);
+    // A pair of declarations (both off, or one on and the other off) writes both elements.
+    for (const value of mode === 'none' ? [base + 'Off'] : strikeDeclarations(mode)) {
+      const tag = value.startsWith('double') ? 'dstrike' : 'strike', node = make(tag);
+      node.setAttributeNS(W, 'w:val', value === 'single' || value === 'double' ? '1' : '0');
+      properties.insertBefore(node, children(properties).find(n => runOrder.indexOf(n.localName) > runOrder.indexOf(tag)) || null);
+    }
   }
   for (const [key, tag] of [['bold', 'b'], ['italic', 'i'], ['boldCs', 'bCs'], ['italicCs', 'iCs'], ['fontSizeCs', 'szCs'], ['cs', 'cs'], ['rtl', 'rtl'], ['noProof', 'noProof'], ['vanish', 'vanish'], ['color', 'color'], ['characterSpacing', 'spacing'], ['textScale', 'w'], ['kerning', 'kern'], ['baselineShift', 'position'], ['fontSize', 'sz'], ['highlight', 'highlight'], ['underline', 'u'], ['shading', 'shd'], ['verticalAlign', 'vertAlign']]) {
     if (!(key in patch) && !(key === 'underline' && ('underlineColor' in patch || 'underlineStyle' in patch))) continue;
@@ -718,7 +729,7 @@ function writeStyles(parts, styles) {
       // paragraph writer intentionally authors both; do not freeze inherited
       // values (or undo an explicit removal) when editing a shared style.
       const explicit = Object.fromEntries(Object.entries(pp).filter(([k,v]) => v !== null && !['lineSpacing', 'lineRule'].includes(k)));
-      writeParagraphFormat(wrapper, { shell: true, formatOverrides: explicit, format: resolvedFormat(styleProperties(styles, style.id)), inheritedTabPositions: [] }, make);
+      writeParagraphFormat(wrapper, { shell: true, formatOverrides: explicit, format: { ...resolvedFormat(styleProperties(styles, style.id), characterUnit(styles)), characterIndents: characterIndent(style.basedOn ? styleProperties(styles, style.basedOn).ind : styles.defaults.properties.ind, characterUnit(styles)).keys }, inheritedTabPositions: [] }, make);
       for (const [key, attr] of [['lineSpacing', 'line'], ['lineRule', 'lineRule']]) if (key in pp && pp[key] !== null) {
         if (!pPr()) wrapper.prepend(make('pPr'));
         let spacing = child(pPr(), 'spacing');
@@ -1060,6 +1071,10 @@ function paragraphWriter(doc, styles, numbering, originals, writeImage, writeLin
           if (run.text !== OBJECT) throw new Error('An equation must occupy one document position.');
           parent.append(doc.importNode(xml(run.math.xml).documentElement, true)); continue;
         }
+        if (run.vml) {
+          if (run.text !== OBJECT) throw new Error('A retained VML object must occupy one document position.');
+          r.append(doc.importNode(xml(run.vml.xml).documentElement, true)); place(r, run); continue;
+        }
         if (run.noBreakHyphen) {
           if (run.text !== '\u2011') throw new Error('Invalid retained nonbreaking hyphen.');
           r.append(make('noBreakHyphen')); place(r, run); continue;
@@ -1121,6 +1136,34 @@ function hasPageStoryControls(root) {
   });
 }
 
+// The text of a WordprocessingML package imported into another (an altChunk), for a read-only preview.
+function previewEmbeddedPackage(bytes) {
+  let total = 0, count = 0;
+  const parts = canonicalMainPart(unzipSync(bytes, { filter: entry => {
+    total += entry.originalSize;
+    if (++count > 2000 || total > 50 * 1024 * 1024) throw new Error('DOCX expanded size exceeds the editor limit.');
+    return true;
+  } }));
+  return DocxPackage.preview(parts).paragraphs;
+}
+
+// Word's page-number building blocks (Insert > Page Number, "Page X of Y") wrap a header or footer's
+// paragraphs in block-level document-part controls (§17.5.2.13 docPartObj), sometimes one inside another.
+// Such a story is edited like any other: the wrappers are kept as block controls and written back
+// around their paragraphs. Any other control (inline, locked, or of another kind) keeps the story retained.
+function documentPartStory(root) {
+  const controls = [...root.getElementsByTagNameNS(W, 'sdt')];
+  if (!controls.length || root.namespaceURI !== W || !['hdr', 'ftr'].includes(root.localName)) return false;
+  return controls.every(control => {
+    const parent = control.parentElement;
+    const block = parent === root || parent?.namespaceURI === W && parent.localName === 'sdtContent' && parent.parentElement?.localName === 'sdt' && parent.parentElement.parentElement && (parent.parentElement.parentElement === root || parent.parentElement.parentElement.localName === 'sdtContent');
+    const properties = children(control).find(n => n.namespaceURI === W && n.localName === 'sdtPr');
+    const own = properties ? children(properties) : [];
+    return block && own.some(n => n.namespaceURI === W && n.localName === 'docPartObj')
+      && own.every(n => n.namespaceURI === W && (['id', 'docPartObj', 'rPr', 'alias', 'tag'].includes(n.localName) || n.localName === 'lock' && n.getAttributeNS(W, 'val') === 'unlocked'));
+  });
+}
+
 export class DocxPackage {
   constructor(parts, paragraphs, originals = new Map(), pageSettings, numbering = emptyNumbering(), styles, tables = [], assets = {}) {
     this.assets = assets;
@@ -1142,6 +1185,8 @@ export class DocxPackage {
   static async open(input, { bestEffort = false } = {}) {
     const bytes = input instanceof Uint8Array ? input : new Uint8Array(await input.arrayBuffer());
     if (bytes.length > MAX_PACKAGE_BYTES) throw new Error('This editor currently opens DOCX files up to 20 MB.');
+    const compound = compoundFileProblem(bytes);
+    if (compound) throw new Error(compound);
     let total = 0, count = 0, parts;
     try {
       parts = unzipSync(bytes, { filter: entry => {
@@ -1150,6 +1195,7 @@ export class DocxPackage {
         return true;
       } });
     } catch (e) { throw new Error(`Could not read this DOCX archive: ${e.message}`); }
+    parts = canonicalMainPart(parts);
     if (!parts['word/document.xml'] || !parts['[Content_Types].xml'] || !parts['_rels/.rels']) throw new Error('This file is not a supported DOCX document.');
     const types = xml(parts['[Content_Types].xml']);
     if (![...types.getElementsByTagNameNS('*', 'Override')].some(n => n.getAttribute('PartName') === '/word/document.xml' && MAIN_TYPES.has(n.getAttribute('ContentType')))) {
@@ -1538,6 +1584,18 @@ export class DocxPackage {
             let display;try{display=formatPageNumber(1,noteFormats.get(sourceNode)||defaultNoteFormat);}catch(e){throw new UnsupportedDocumentError(e.message);}
             push();text=display;push();runs.at(-1).noteMark={kind:t.localName,text:display};
           }
+          else if (t.namespaceURI === W && t.localName === 'pict' && context.pageStory && !context.drawingText && readVmlWatermark(t)) {
+            // A Word watermark (a VML shape behind the text, in a header) is one retained object: its XML
+            // is saved unchanged and what it describes is drawn behind each page's text.
+            const watermark = readVmlWatermark(t);
+            // A picture watermark's image is decoded with the other pictures, for drawing; its part is never rewritten.
+            if (watermark.kind === 'picture') {
+              const path = watermarkImagePart(parts, context.pageStory, watermark.imageRel, { parseXml: xml, relationshipPartPath, partPathForUrl });
+              let info = null; try { info = path && imageInfo(parts[path]); } catch { info = null; }
+              if (info && ['image/png', 'image/jpeg', 'image/gif'].includes(info.mime)) { assets[path] ||= { bytes: parts[path], mime: info.mime }; watermark.assetId = path; }
+            }
+            push(); text = OBJECT; push(); runs.at(-1).vml = { xml: serializeFragment(t), watermark };
+          }
           else if (t.namespaceURI === W && t.localName === 'cr') text += '\v';
           else if (t.namespaceURI === W && t.localName === 'drawing') pushDrawing(t, () => paragraphImageReader(t));
           else if (t.namespaceURI === MC && t.localName === 'AlternateContent') {
@@ -1699,7 +1757,6 @@ export class DocxPackage {
         for (const control of [...controls, ...(context.blockControls || [])]) resolveCharacterRun({ ...control.inputRun, text: '' }, styles, paragraphRunStyle(p, styles), { displayOnly: preview });
       } catch (e) { throw e instanceof UnsupportedDocumentError ? e : new UnsupportedDocumentError(e.message); }
       if (controls.length && changedContentControls([p]).size) throw new UnsupportedDocumentError('content control boundaries inside grapheme clusters');
-      checkJustificationText(paragraphText(p), p.format.alignment);
       if (p.cellId && p.format.pageBreakBefore) {
         if (!preview) throw new UnsupportedDocumentError('paragraph page breaks inside table cells');
         issues.delete('paragraph page breaks inside table cells');
@@ -1760,7 +1817,7 @@ export class DocxPackage {
             result.push(p);
           }
           else if (node.localName === 'sdt') {
-            const { control, content } = readControl(node, 'block');
+            const { control, content } = readControl(node, 'block', { sharedId: !!context.pageStory });
             if (control.persistent && children(content).some(n => n.namespaceURI === W && n.localName === 'tbl'))
               throw new UnsupportedDocumentError('persistent controls around tables');
             control.scope = context.cellId || null;
@@ -1780,7 +1837,8 @@ export class DocxPackage {
           // promotes text to the body and invalidates the surrounding table.
           // Keep a source for the table reader even when strict paragraph import
           // failed before it could register an original. This is display-only.
-          const recovered = previewParagraphs(node);
+          const chunk = node.namespaceURI === W && node.localName === 'altChunk' && !context.pageStory ? altChunkParagraphs(parts, node, 'word/document.xml', previewEmbeddedPackage) : null;
+          const recovered = chunk || previewParagraphs(node);
           if (context.cellId && !recovered.length) recovered.push(paragraph());
           // Only the table reader and story originals read it, so body blocks need none: a
           // recovered table has a paragraph per cell, and each copy of the whole table made
@@ -1867,10 +1925,11 @@ export class DocxPackage {
       const activeStories = pkg.pageStories ? activePageStoryPaths(pkg.pageStories) : new Set();
       for (const [path, story] of Object.entries(pkg.pageStories?.stories || {})) {
         if (!activeStories.has(path)) { story.paragraphs = []; story.tables = []; continue; }
-        story.paragraphs = attempt(() => {
+        const readStory = documentParts => {
           const root = xml(parts[path]).documentElement;
-          story.editable = !preview && !hasPageStoryControls(root);
-          if (preview) {
+          story.editable = !preview && (documentParts || !hasPageStoryControls(root));
+          if (documentParts) { /* Block document-part wrappers are read as block controls below. */ }
+          else if (preview) {
             projectControlContents(root);
             projectCachedFieldResults(root, styles, field => {
               // A picture result (INCLUDEPICTURE) shows as its picture in the preview.
@@ -1883,7 +1942,7 @@ export class DocxPackage {
           } else projectRetainedStoryControls(root);
           // Tables and relationships have story-local registries.
           // In preview, let readBlocks recover locally instead of losing the story.
-          if (children(root).some(n => n.namespaceURI !== W || !['p', 'tbl'].includes(n.localName))) unsupported('page story blocks not yet implemented');
+          if (children(root).some(n => n.namespaceURI !== W || !['p', 'tbl', ...(documentParts ? ['sdt'] : [])].includes(n.localName))) unsupported('page story blocks not yet implemented');
           // Story bookmarks still need an editable identity scope.
           // Runs, drawings, scoped hyperlinks and page fields use strict readers. Proofing marks
           // (§17.13.8.1 proofErr, cached spelling results) are left out of a rewritten story.
@@ -1895,6 +1954,12 @@ export class DocxPackage {
           documentBlocks(paragraphs, story.tables);
           checkMarkers(paragraphs);
           return paragraphs;
+        };
+        story.paragraphs = attempt(() => {
+          const documentParts = !preview && documentPartStory(xml(parts[path]).documentElement);
+          if (!documentParts) return readStory(false);
+          // Wrappers the control reader refuses keep the story retained, shown as before.
+          try { return readStory(true); } catch (error) { if (!(error instanceof UnsupportedDocumentError)) throw error; return readStory(false); }
         }, null);
         if (story.paragraphs) pkg.storyOriginals.set(path, {
           signature: JSON.stringify({ paragraphs: story.paragraphs, tables: story.tables }),
@@ -2179,7 +2244,7 @@ export class DocxPackage {
         root = children(doc.documentElement).find(n => n.namespaceURI === W && n.localName === element && n.getAttributeNS(W, 'id') !== null && BigInt(n.getAttributeNS(W, 'id')).toString() === noteId);
         if (!root) { root = doc.createElementNS(W, `w:${element}`); root.setAttributeNS(W, 'w:id', noteId); doc.documentElement.append(root); }
       }
-      if (hasPageStoryControls(root)) throw new Error('Page stories containing content controls are retained without editing.');
+      if (hasPageStoryControls(root) && (noteId !== null || !documentPartStory(root))) throw new Error('Page stories containing content controls are retained without editing.');
       if (paragraphs.some(p => p.sectionEnd || p.bookmarks?.length || p.pageStory && p.pageStory !== part)) throw new Error('Invalid page-story paragraph scope.');
       if (changedContentControls(paragraphs).size || changedBlockControls(paragraphs, tables).size) throw new Error('Modified page-story controls are not supported.');
       const blocks = documentBlocks(paragraphs, tables);

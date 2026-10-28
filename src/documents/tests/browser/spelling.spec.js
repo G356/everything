@@ -136,3 +136,58 @@ test('a picture in front of the text covers the spelling marks under it, as it c
   await expect.poll(async () => (await marks()).beside).toBeGreaterThan(0);
   expect((await marks()).covered).toBe(0);
 });
+
+test('a word ignored once stays ignored after text is typed or deleted before it', async ({ page }) => {
+  const input = await newDocument(page, 'Zorblax met the Zorblax there.');
+  await expect(proofing(page)).toHaveAttribute('aria-label', /2 errors found/);
+  await input.press('ControlOrMeta+Home');
+  await input.press('F7');
+  const pane = page.getByRole('complementary', { name: 'Spelling' });
+  await expect(pane.locator('mark')).toHaveText('Zorblax');
+  await pane.getByRole('button', { name: 'Ignore Once', exact: true }).click();
+  await expect(proofing(page)).toHaveAttribute('aria-label', /1 error found/);
+  // The pane goes on from the start: the first is still the one ignored, the other is the one marked.
+  const reviewFromStart = async at => {
+    await input.press('ControlOrMeta+Home');
+    await input.press('F7');
+    await expect(pane.locator('mark')).toHaveText('Zorblax');
+    await expect.poll(() => input.evaluate(el => el.selectionStart)).toBe(at);
+    await pane.getByRole('button', { name: 'Close Spelling pane' }).click();
+  };
+  await pane.getByRole('button', { name: 'Close Spelling pane' }).click();
+  await input.press('ControlOrMeta+Home');
+  await page.keyboard.type('Hi ');
+  await expect(input).toHaveValue('Hi Zorblax met the Zorblax there.');
+  await reviewFromStart(19);
+  await input.press('ControlOrMeta+Home');
+  for (let i = 0; i < 2; i++) await input.press('Delete');
+  await expect(input).toHaveValue(' Zorblax met the Zorblax there.');
+  await reviewFromStart(17);
+});
+
+test('a word missing its apostrophe is offered the contraction, with the apostrophe autocorrect types', async ({ page }) => {
+  const input = await newDocument(page, 'I dont know why it wasnt there.');
+  await expect(proofing(page)).toHaveAttribute('aria-label', /2 errors found/);
+  const menu = await wordMenu(page, input, 'dont');
+  await expect(menu.getByRole('menuitem').first()).toHaveText('don’t');
+  await menu.getByRole('menuitem', { name: 'don’t', exact: true }).click();
+  await expect(input).toHaveValue('I don’t know why it wasnt there.');
+  await input.press('F7');
+  const pane = page.getByRole('complementary', { name: 'Spelling' });
+  await expect(pane.locator('mark')).toHaveText('wasnt');
+  await expect(pane.getByRole('option').first()).toHaveText('wasn’t');
+  await pane.getByRole('button', { name: 'Change', exact: true }).click();
+  await expect(input).toHaveValue('I don’t know why it wasn’t there.');
+  await expect(proofing(page)).toHaveAttribute('aria-label', 'Spelling: no errors');
+});
+
+test('words with optional hyphens are checked without them, and corrected whole', async ({ page }) => {
+  // Manual hyphenation puts optional hyphens inside words.
+  const input = await newDocument(page, 'Manual hyph­enation keeps words recie­ved whole.');
+  await expect(proofing(page)).toHaveAttribute('aria-label', /1 error found/);
+  const menu = await wordMenu(page, input, 'recie');
+  await expect(menu.getByRole('menuitem').first()).toHaveText('received');
+  await menu.getByRole('menuitem', { name: 'received', exact: true }).click();
+  await expect(input).toHaveValue('Manual hyph­enation keeps words received whole.');
+  await expect(proofing(page)).toHaveAttribute('aria-label', 'Spelling: no errors');
+});

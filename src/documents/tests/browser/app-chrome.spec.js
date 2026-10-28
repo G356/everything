@@ -505,3 +505,62 @@ test('Enter in the Tabs dialog with no position typed is OK, not an error', asyn
   await expect(dialog.getByRole('listbox', { name: 'Tab stops' }).getByRole('option')).toHaveCount(1);
   await expect(dialog).toBeVisible();
 });
+
+test('Escape leaves a submenu that opened over its own item in a narrow window', async ({ page }) => {
+  await openEditor(page, 390);
+  await page.getByRole('button', { name: 'Menus', exact: true }).click();
+  // The mouse stays where it clicked: on a narrow window the File menu opens over the File item.
+  await page.getByRole('menu', { name: 'Menus' }).getByRole('menuitem', { name: 'File', exact: true }).click();
+  await expect(page.getByRole('menu', { name: 'File', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu', { name: 'File', exact: true })).toBeHidden();
+  await expect(page.getByRole('menu', { name: 'Menus' }).getByRole('menuitem', { name: 'File', exact: true })).toBeFocused();
+  // The menu stays closed: the item uncovered under the resting pointer does not open it again.
+  await page.waitForTimeout(400);
+  await expect(page.getByRole('menu', { name: 'File', exact: true })).toBeHidden();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.menu')).toHaveCount(0);
+});
+
+test('a list of choices in a dialog draws no drop-down arrow', async ({ page }) => {
+  await openEditor(page);
+  const arrows = dialog => dialog.locator('select').evaluateAll(lists => lists.filter(s => s.size > 1 || s.multiple)
+    .map(s => [s.getAttribute('aria-label'), getComputedStyle(s).backgroundImage]));
+  await (await openMenu(page, 'Insert')).getByRole('menuitem', { name: 'Field…' }).click();
+  let dialog = page.getByRole('dialog', { name: 'Field' });
+  await expect(dialog).toBeVisible();
+  expect(await arrows(dialog)).toEqual([['Field names', 'none']]);
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await (await openMenu(page, 'Edit')).getByRole('menuitem', { name: 'Find', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Go To…' }).click();
+  dialog = page.getByRole('dialog', { name: 'Go To' });
+  await expect(dialog).toBeVisible();
+  expect(await arrows(dialog)).toEqual([['Go to what', 'none']]);
+});
+
+test('command search names the Navigation Pane chord as the platform does', async ({ page }) => {
+  await openEditor(page);
+  const search = page.getByRole('combobox', { name: 'Search for commands' });
+  await search.click(); await search.fill('navigation pane');
+  const option = page.getByRole('listbox', { name: 'Commands' }).getByRole('option', { name: /^Navigation Pane/ }).first();
+  await expect(option.locator('.ed-search-key')).toHaveText(MAC ? 'Cmd+Option+O' : 'Ctrl+Alt+O');
+  // And the chord opens it.
+  await search.press('Escape'); await search.press('Escape');
+  await text(page).press(MAC ? 'Meta+Alt+o' : 'Control+Alt+o');
+  await expect(page.getByLabel('Search document')).toBeFocused();
+});
+
+test('contrast themes show which way the AutoSave and Preferences switches are set', async ({ page }) => {
+  await page.emulateMedia({ forcedColors: 'active' });
+  await openEditor(page);
+  // The knob must stand out from the track it slides along, and the track must change with the setting.
+  const look = locator => locator.evaluate(el => { const track = getComputedStyle(el), knob = getComputedStyle(el, '::after'); return { track: track.backgroundColor, knob: knob.backgroundColor }; });
+  const autosave = page.locator('.ed-autosave .ed-switch');
+  const on = await look(autosave);
+  expect(on.knob).not.toBe(on.track);
+  await page.getByRole('switch', { name: 'AutoSave' }).uncheck({ force: true });
+  const off = await look(autosave);
+  expect(off.knob).not.toBe(off.track);
+  expect(off.track).not.toBe(on.track);
+});

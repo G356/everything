@@ -14,6 +14,8 @@
   --ed-accent-wash: #e5ecf5;
   --ed-workspace: #f3f3f3;
   --ed-page-edge: #d4d4d4;
+  /* Behind Read Mode's pages, with no page color chosen. */
+  --ed-read-backdrop: #f6f5f2;
   /* Lines in shape thumbnails, which have no fill to stand on. */
   --ed-shape-line: #44546a;
 }
@@ -32,6 +34,7 @@
     --ed-accent-wash: #2d3d52;
     --ed-workspace: #1a1a1a;
     --ed-page-edge: #3a3a3a;
+    --ed-read-backdrop: #1a1a1a;
     --ed-shape-line: #a7b4c6;
   }
 }
@@ -49,6 +52,7 @@
   --ed-accent-wash: #2d3d52;
   --ed-workspace: #1a1a1a;
   --ed-page-edge: #3a3a3a;
+  --ed-read-backdrop: #1a1a1a;
   --ed-shape-line: #a7b4c6;
 }
 
@@ -274,12 +278,17 @@ button.ed-status-item:hover, .ed-status-view:hover, .ed-zoom-step:hover { backgr
 .ed-status-view[aria-pressed="true"] { background: var(--ed-press); }
 .ed-zoom { display: flex; align-items: center; gap: 2px; margin-left: 4px; }
 .ed-zoom-step.icon-btn { width: 22px; height: 22px; border-radius: 4px; color: var(--ed-ink-2); }
+.ed-zoom-step[aria-disabled="true"] { opacity: .45; cursor: default; }
+.ed-zoom-step[aria-disabled="true"]:hover { background: none; }
 .ed-zoom-slider { width: 110px; height: 16px; accent-color: var(--ed-ink-3); }
 .ed-statusbar .canvas-zoom select { min-width: 58px; padding: 2px 16px 2px 4px; background-color: transparent; font-size: 12px; text-align: right; }
 
 /* ---- Focus mode: the page alone ---- */
 .ed-focus .ed-header, .ed-focus .ed-ribbon, .ed-focus .ed-statusbar, .ed-focus .canvas-message { display: none !important; }
 .ed-focus .canvas-host { background: #1d1d1d; }
+/* The page alone: the rulers (and the tab-type button that goes with them) leave with the rest of the window. */
+.ed-focus .canvas-ruler-top, .ed-focus .canvas-ruler-side, .ed-focus .canvas-tab-selector { display: none; }
+.ed-focus .canvas-document-surface.has-rulers { padding-top: 0; }
 .ed-focus-exit { position: fixed; top: 12px; right: 16px; z-index: 50; }
 
 /* ---- Small dialogs ---- */

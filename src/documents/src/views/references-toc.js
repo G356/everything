@@ -13,6 +13,8 @@ export function createTocCommands(ctx) {
   const { editor, ready, runBody, error } = ctx;
   const engineToc = () => import('../engine/toc.js');
   const bodyParagraphs = () => editor()?.session.body.paragraphs || [];
+  // A new table goes into the text: not while a header, footer or note is being edited.
+  const bodyReady = () => !!ready() && editor()?.session.path === null;
   let tocModule = null;
   engineToc().then(m => { tocModule = m; }).catch(() => {});
   const tables = () => { try { return tocModule ? tocModule.tocFields(bodyParagraphs()) : []; } catch { return []; } };
@@ -36,7 +38,7 @@ export function createTocCommands(ctx) {
     const designs = tocModule?.TOC_DESIGNS || [];
     return [
       { header: 'Automatic tables' },
-      ...designs.map(design => galleryItem({ label: design.name, description: design.description, disabled: !ready(), focusEditor, onSelect: () => insertDesign(design),
+      ...designs.map(design => galleryItem({ label: design.name, description: design.description, disabled: !bodyReady(), focusEditor, onSelect: () => insertDesign(design),
         preview: tablePreview(SAMPLE.filter(r => r.level <= design.levels).map(r => ({ ...r, bold: design.boldTop && r.level === 1 })), { title: design.title, leader: design.leader, rightAlign: design.rightAlign !== false, pageNumbers: design.pageNumbers !== false }) })),
     ];
   }
@@ -46,7 +48,7 @@ export function createTocCommands(ctx) {
     return [
       ...galleryItems(focusEditor),
       { separator: true },
-      { label: 'Custom Table of Contents…', icon: 'toc', disabled: !ready(), onSelect: () => customDialog() },
+      { label: 'Custom Table of Contents…', icon: 'toc', disabled: !bodyReady(), onSelect: () => customDialog() },
       { label: 'Update Table…', icon: 'updateTable', disabled: !ready() || !has, onSelect: () => updateDialog(false) },
       { label: 'Remove Table of Contents', icon: 'delete', disabled: !ready() || !has, onSelect: () => runBody((body, toc) => toc.removeTableOfContents(body, tableFor(toc, body, false)), { modules: ['toc'] }) },
     ];
@@ -128,11 +130,19 @@ export function createTocCommands(ctx) {
 
   async function updateTable(figures = false, mode = 'entire') {
     if (mode === 'pages') {
-      return runBody((body, toc) => {
+      // A table another application wrote can show its page numbers as plain text (LibreOffice does): with no
+      // PAGEREF fields there is nothing to refresh, and the update did nothing without saying so.
+      let plain = false;
+      const result = await runBody((body, toc) => {
         const target = tableFor(toc, body, figures);
         if (!target) return false;
-        return { only: toc.tocPageReferences(body, target) };
+        const only = toc.tocPageReferences(body, target);
+        if (!only.size && !target.options.omitPageNumbers) { plain = true; return false; }
+        return { only };
       }, { modules: ['toc'], scopedRefresh: true });
+      // Shown in the Update dialog, which stays open for the other choice.
+      if (plain) throw new Error(`This table of ${figures ? 'figures' : 'contents'} has no page-number fields to update. Choose Update entire table to rebuild it with its page numbers.`);
+      return result;
     }
     return runBody((body, toc) => {
       const target = tableFor(toc, body, figures);

@@ -104,7 +104,10 @@ export function fieldUpdatePlan(model, { onIssue = () => {}, notes = null } = {}
       } else if (relative) value = withCases(range.end <= bookmark.start ? 'below' : 'above', cases);
       else {
         value = text.slice(bookmark.start, Math.min(bookmark.end, text.length));
-        if (bookmark.columnRange || /[\n￼]/.test(value)) { retain('A REF with structural or object content cannot be refreshed yet'); continue; }
+        if (bookmark.columnRange || value.includes('\n')) { retain('A REF with structural content cannot be refreshed yet'); continue; }
+        // Notes, pictures and equations in the target are object characters: the result leaves them out and
+        // shows breaks as spaces, as the cross-reference was inserted (captions.js).
+        value = value.replace(/\uFFFC/g, '').replace(/[\f\u000e]/g, ' ');
         value = withCases(value, cases);
       }
     } else if (type === '=') value = formulaResult(model, range.field.instruction, range.cellId || null);
@@ -132,6 +135,11 @@ export function fieldUpdatePlan(model, { onIssue = () => {}, notes = null } = {}
 export function updateSequenceFields(model, options) {
   const tracking = model.trackChanges; model.trackChanges = false;
   const updated = new Set();
+  // The selection stays on the text it was on: each result is selected to replace it, which moved the
+  // caret to the last field updated (the first in the document) on every F9.
+  const { anchor: anchorBefore, focus: focusBefore, controlCaret, controlSelection } = model.selection;
+  let anchor = anchorBefore, focus = focusBefore;
+  const typing = { typingFormat: model.typingFormat, typingStyle: model.typingStyle, typingDirectCleared: model.typingDirectCleared };
   try {
     // A cross-reference shows the text of what it refers to, which a SEQ field in this same pass may change:
     // plan again after applying, until nothing changes (a few passes; references do not refer to references).
@@ -140,12 +148,18 @@ export function updateSequenceFields(model, options) {
       for (const { range, text } of [...fieldUpdatePlan(model, pass ? { ...options, onIssue: () => {} } : options)].reverse()) {
         // A result never spans a paragraph mark: replacing one that does would merge paragraphs.
         if (model.text.slice(range.start, range.end).includes('\n')) continue;
+        const map = at => at <= range.start ? at : at >= range.end ? at + text.length - (range.end - range.start) : range.start + Math.min(at - range.start, text.length);
+        anchor = map(anchor); focus = map(focus);
         model.select(range.start, range.end);
         model.typingFormat = {}; model.typingStyle = null; model.typingDirectCleared = false;
         model.replaceResult(text, { checkpoint: false });
         updated.add(range.field.id); applied++;
       }
       if (!applied) break;
+    }
+    if (updated.size) {
+      model.select(anchor, focus, ...(anchor === anchorBefore && focus === focusBefore ? [controlCaret, controlSelection] : []));
+      Object.assign(model, typing);
     }
   } finally { model.trackChanges = tracking; }
   if (updated.size) model.didChange();

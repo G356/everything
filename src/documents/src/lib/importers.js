@@ -49,6 +49,7 @@ export function htmlBody(html, { preserveFallback = false } = {}) {
   const parsed = new DOMParser().parseFromString(src, 'text/html');
   // Formatting a page gives through its style sheet goes before the style sheet does.
   if (parsed.body && parsed.styleSheets?.length) inlineSheetFormatting(parsed);
+  if (parsed.body) { keepBlankLines(parsed.body); nestClassedLists(parsed.body); }
   // Markup the converter reads poorly (definition lists, captions, checkboxes, <font>, <center>, hidden content) takes a
   // form it reads well, before the form controls it would otherwise stand in are dropped with the rest of the non-content.
   if (parsed.body) normalizeMarkup(parsed.body);
@@ -71,6 +72,14 @@ export function htmlBody(html, { preserveFallback = false } = {}) {
       }
     }
   }
+  // A web page Google Docs exports sends every link through Google's redirect (google.com/url?q=<address>&usg=…): the
+  // document links to the address itself, as the text it was written in did.
+  for (const a of parsed.querySelectorAll('a[href^="https://www.google.com/url?"]')) {
+    try {
+      const target = new URL(a.getAttribute('href')).searchParams.get('q');
+      if (target && /^(https?:|mailto:|tel:)/i.test(target)) a.setAttribute('href', target);
+    } catch { /* not an address: left as it is */ }
+  }
   // Tables the converter would refuse (a row-spanning cell, a table in a cell) are rewritten into ones it takes.
   if (parsed.body?.querySelector('table')) normalizeTables(parsed.body);
   // HTML consumes one optional newline immediately after a PRE start tag.
@@ -82,8 +91,48 @@ export function htmlBody(html, { preserveFallback = false } = {}) {
   return parsed.body ? parsed.body.innerHTML : src;
 }
 
-/** The style-sheet properties carried onto elements: emphasis, decoration, script position and alignment. */
-const SHEET_PROPERTIES = ['font-weight', 'font-style', 'text-decoration-line', 'vertical-align', 'text-align'];
+/** The style-sheet properties carried onto elements: emphasis, decoration, script position, alignment and height. */
+const SHEET_PROPERTIES = ['font-weight', 'font-style', 'text-decoration-line', 'vertical-align', 'text-align', 'height'];
+
+/**
+ * An empty paragraph the page gives a height is a blank line (Google Docs writes one as <p class="c2"><span></span></p>,
+ * the class giving it a line's height): it gets a line break, so it is not taken for markup around nothing.
+ */
+function keepBlankLines(body) {
+  for (const p of body.querySelectorAll('p')) {
+    if (p.textContent.trim() || p.querySelector('img, br, table, ul, ol')) continue;
+    if (Number.parseFloat(p.style?.height) > 0) p.append(p.ownerDocument.createElement('br'));
+  }
+}
+
+/**
+ * Lists a page nests by class rather than by markup, as Google Docs writes them: every level is a list of its own
+ * (class lst-kix_<list>-<level>), one after another, and the style sheet indents them and numbers them on. Each deeper
+ * one goes into the last item of the list before it a level up, and a list that goes on from one of the same list and
+ * level (without "start") becomes part of it, so the levels nest and the numbers run on as on the page.
+ */
+function nestClassedLists(body) {
+  const kix = (el) => /\blst-kix_(\S+)-(\d+)\b/.exec(el.className || '');
+  if (!body.querySelector('ul[class*="lst-kix_"], ol[class*="lst-kix_"]')) return;
+  for (const parent of new Set([...body.querySelectorAll('ul[class*="lst-kix_"], ol[class*="lst-kix_"]')].map((list) => list.parentElement))) {
+    let stack = [];
+    for (const el of [...parent.children]) {
+      const match = /^(UL|OL)$/.test(el.tagName) ? kix(el) : null;
+      if (!match) { stack = []; continue; }
+      const [, id, levelText] = match, level = Math.min(8, Number(levelText));
+      const goesOn = !el.classList.contains('start');
+      const same = stack[level];
+      if (same && same.id === id && same.list.tagName === el.tagName && goesOn) {
+        same.list.append(...el.children);
+        el.remove();
+      } else if (level > 0 && stack[level - 1]) {
+        stack[level - 1].list.lastElementChild?.append(el);
+        stack[level] = { id, list: el };
+      } else stack[level] = { id, list: el };
+      stack.length = level + 1;
+    }
+  }
+}
 
 /**
  * Write the formatting a page's style sheets give its elements into their style attributes, where the
@@ -142,6 +191,8 @@ export function decodeTextFile(bytes, kind = null) {
   const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   if (b[0] === 0xff && b[1] === 0xfe) return new TextDecoder('utf-16le').decode(b);
   if (b[0] === 0xfe && b[1] === 0xff) return new TextDecoder('utf-16be').decode(b);
+  const unmarked = unmarkedUtf16(b);
+  if (unmarked) return unmarked;
   try { return new TextDecoder('utf-8', { fatal: true }).decode(b); } catch { /* not UTF-8 throughout */ }
   const declared = kind === 'html' ? declaredCharset(b) : null;
   // A UTF-16 label on a byte-oriented page is stale (the bytes were not UTF-16, or the BOM above would have said so): browsers read such a page as UTF-8.
@@ -159,7 +210,69 @@ export function decodeTextFile(bytes, kind = null) {
   if (valid >= damaged) return utf8;
   const cjk = legacyCjkText(b);
   if (cjk != null) return cjk;
+  const other = legacyAlphabetText(b);
+  if (other != null) return other;
   try { return new TextDecoder('windows-1252').decode(b); } catch { return utf8; }
+}
+
+/**
+ * The Windows code pages of the other alphabets, each with the letters written most often in its languages
+ * (Russian and Ukrainian; Greek; Hebrew; Arabic). Their letters sit on the bytes Windows-1252 gives to accented
+ * Latin letters.
+ */
+const LEGACY_ALPHABETS = [
+  { encoding: 'windows-1251', script: /\p{Script=Cyrillic}/u, common: new Set('оеаинтсрвлкмдпуі') },
+  { encoding: 'windows-1253', script: /\p{Script=Greek}/u, common: new Set('αοεινστηκρπυμλάέήίόύώ') },
+  { encoding: 'windows-1255', script: /\p{Script=Hebrew}/u, common: new Set('יוהלאמרבתנשעכד') },
+  { encoding: 'windows-1256', script: /\p{Script=Arabic}/u, common: new Set('الينمورتبعهدفك') },
+];
+
+/**
+ * The text of a file in the Windows code page of a Cyrillic, Greek, Hebrew or Arabic text (as Notepad saved it
+ * before Unicode); null when the bytes do not read as one. Read in Windows-1252, such a text is accented Latin
+ * letters throughout ("Ïðèâåò" for "Привет"). An encoding is taken only when its letters make up the text beyond
+ * ASCII, stand in words of their own rather than among Latin letters (as a Western text's accented letters do,
+ * "café"), and are mostly its language's common ones. A short text says too little and stays Windows-1252.
+ */
+function legacyAlphabetText(b) {
+  let best = null;
+  for (const { encoding, script, common } of LEGACY_ALPHABETS) {
+    let text;
+    try { text = new TextDecoder(encoding, { fatal: true }).decode(b); } catch { continue; }
+    const sample = text.slice(0, 65536);
+    let wide = 0, own = 0, usual = 0;
+    for (const ch of sample) {
+      if (ch <= '\x7f') continue;
+      wide++;
+      if (script.test(ch)) { own++; if (common.has(ch.toLowerCase())) usual++; }
+    }
+    if (own < 8 || own / wide < 0.8) continue;
+    const words = sample.split(/[^\p{L}\p{M}]+/u).filter((word) => script.test(word));
+    if (words.filter((word) => /[A-Za-z]/.test(word)).length > words.length * 0.1) continue;
+    const score = usual / own;
+    if (score >= 0.3 && (!best || score > best.score)) best = { text, score };
+  }
+  return best ? best.text : null;
+}
+
+/**
+ * UTF-16 without a byte-order mark (some editors and tools write it so): text has spaces, digits and line ends, whose
+ * second byte (little-endian) or first (big-endian) is zero, and a text in any 8-bit encoding has no zero bytes. A
+ * file whose zero bytes fall on one side of the pairs, and that reads as UTF-16 throughout, is read as it; null else.
+ */
+function unmarkedUtf16(b) {
+  if (b.length < 4 || b.length % 2) return null;
+  const n = Math.min(b.length, 8192) & ~1;
+  let even = 0, odd = 0;
+  for (let i = 0; i < n; i += 2) { if (!b[i]) even++; if (!b[i + 1]) odd++; }
+  const pairs = n / 2, zeros = even + odd;
+  if (zeros < 2) return null;
+  const encoding = odd >= zeros * 0.9 && odd >= pairs * 0.05 ? 'utf-16le' : even >= zeros * 0.9 && even >= pairs * 0.05 ? 'utf-16be' : null;
+  if (!encoding) return null;
+  let text;
+  try { text = new TextDecoder(encoding, { fatal: true }).decode(b); } catch { return null; }
+  // Read as UTF-16, text is letters, not control characters.
+  return (text.match(/[\x00-\x08\x0e-\x1f]/g) || []).length <= text.length * 0.01 ? text : null;
 }
 
 // The characters written most often in Korean and in Chinese text. Text in the other language, or in a

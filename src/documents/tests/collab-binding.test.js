@@ -199,6 +199,42 @@ describe('co-editing binding', () => {
     expect(bob.engine.viewOnly).toBe(false);
   });
 
+  it('sends a picture added in single-editor mode to the others with its bytes', async () => {
+    const { people: [ann, bob] } = await room('form');
+    ann.engine.execute(m => { m.paragraphs[0].runs.push({ ...m.paragraphs[0].runs[0], text: '', contentControl: { id: 7, placeholder: true } }); m.didChange(); });
+    await settle();
+    expect(ann.binding.mode).toBe('single');
+    ann.engine.execute(m => { m.assets.logo = { bytes: new Uint8Array([137, 80, 78, 71]), mime: 'image/png' }; m.select(0); m.insertImage('logo', { width: 100, height: 100 }); });
+    await settle();
+    const run = bob.engine.model.paragraphs[0].runs.find(r => r.image);
+    expect(run).toBeTruthy();
+    // Without the picture's bytes the others cannot show it, and the owner's tab cannot save the file.
+    expect(bob.engine.session.body.assets[run.image.assetId]?.bytes).toEqual(new Uint8Array([137, 80, 78, 71]));
+    // Its id is this person's own, so it cannot stand for another picture someone else adds.
+    expect(run.image.assetId).toMatch(/@/);
+  });
+
+  it('undoes and redoes the single editor\'s own changes, and shares the result', async () => {
+    const { people: [ann, bob] } = await room('form');
+    // An empty form field, which the shared text cannot hold, as an opened form brings one.
+    ann.engine.execute(m => { m.paragraphs[0].runs = [...m.paragraphs[0].runs, { ...m.paragraphs[0].runs[0], text: '', contentControl: { id: 7, persistent: true } }]; m.didChange(); });
+    await settle();
+    expect(ann.binding.mode).toBe('single');
+    ann.engine.execute(m => { m.select(0); m.replace('Typed '); });
+    await settle();
+    expect(bob.engine.model.text).toBe('Typed form');
+    expect(ann.engine.session.history.length).toBeGreaterThan(0);
+    ann.engine.undo();
+    await settle();
+    expect(ann.engine.model.text).toBe('form');
+    expect(bob.engine.model.text).toBe('form');
+    expect([ann.engine.session.future.length, ann.binding.mode, ann.binding.holdsLock()]).toEqual([1, 'single', true]);
+    ann.engine.redo();
+    await settle();
+    expect(ann.engine.model.text).toBe('Typed form');
+    expect(bob.engine.model.text).toBe('Typed form');
+  });
+
   it('gives people stable, readable colors and parses links', () => {
     expect(colorFor('alice')).toBe(colorFor('alice'));
     expect(PERSON_COLORS).toContain(colorFor('bob'));

@@ -162,3 +162,59 @@ test('tabs and runs of spaces stay in the HTML a copy gives other applications',
   }, html);
   expect(pasted).toEqual(['Name\tQty   (three spaces)', 'Pens\t2']);
 });
+
+test('Paste without formatting from the keyboard needs no permission to read the clipboard', async ({ page }) => {
+  await blank(page);
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await input(page).focus();
+  await page.keyboard.type('Plain ');
+  await input(page).press('ControlOrMeta+b');
+  await page.keyboard.type('Bold');
+  await input(page).evaluate(el => { el.setSelectionRange(6, 10); el.dispatchEvent(new Event('select')); });
+  // A keyboard copy writes the clipboard through its own event; no permission is granted to read it back.
+  await input(page).press('ControlOrMeta+c');
+  await input(page).press('ControlOrMeta+End');
+  await input(page).press('ControlOrMeta+b');
+  await page.keyboard.type(' ');
+  // The chord as Windows and Linux browsers take it: Paste as plain text, through the browser's own paste.
+  const cdp = await page.context().newCDPSession(page);
+  // Off a Mac, Chrome's own key binding for Ctrl+Shift+V pastes and matches style; on a Mac the command is sent as a
+  // browser that binds Cmd+Shift+V would. Sending it off a Mac as well would paste twice.
+  const mac = process.platform === 'darwin', modifiers = mac ? 4 | 8 : 2 | 8;
+  for (const type of ['rawKeyDown', 'keyUp']) await cdp.send('Input.dispatchKeyEvent', { type, key: 'V', code: 'KeyV', windowsVirtualKeyCode: 86, modifiers, ...(type === 'rawKeyDown' && mac ? { commands: ['pasteAndMatchStyle'] } : {}) });
+  await expect(input(page)).toHaveValue('Plain Bold Bold');
+  expect(await state(page, 'Bold', 11)).toMatchObject({ bold: 'false' });
+  await expect(page.locator('.toast')).toHaveCount(0);
+  // Pasted as one step.
+  await input(page).press('ControlOrMeta+z');
+  await expect(input(page)).toHaveValue('Plain Bold ');
+  expect(errors).toEqual([]);
+});
+
+for (const platform of ['MacIntel', 'Linux x86_64']) test(`Paste without formatting pastes once when the browser's paste event comes late (${platform})`, async ({ browser }) => {
+  // The chord's keydown, then the browser's own paste arriving well after it (as on a busy Linux machine), with the
+  // clipboard as the document would read it: the text comes in once, without formatting, whichever way it arrives.
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.addInitScript(value => Object.defineProperty(Navigator.prototype, 'platform', { get: () => value }), platform);
+  try {
+    await blank(page);
+    const errors = []; page.on('pageerror', e => errors.push(e.message));
+    await input(page).focus();
+    await page.keyboard.type('Plain ');
+    await page.evaluate(() => { navigator.clipboard.readText = async () => 'Bold'; });
+    await input(page).evaluate(el => {
+      const mac = /Mac/.test(navigator.platform);
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'V', code: 'KeyV', shiftKey: true, ctrlKey: !mac, metaKey: mac, bubbles: true, cancelable: true }));
+    });
+    await page.waitForTimeout(100);
+    await input(page).evaluate(el => {
+      const data = new DataTransfer(); data.setData('text/plain', 'Bold'); data.setData('text/html', '<b>Bold</b>');
+      el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    });
+    await page.waitForTimeout(100);
+    await expect(input(page)).toHaveValue('Plain Bold');
+    expect(await state(page, 'Bold', 6)).toMatchObject({ bold: 'false' });
+    expect(errors).toEqual([]);
+  } finally { await context.close(); }
+});

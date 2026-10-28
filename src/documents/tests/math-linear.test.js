@@ -189,6 +189,32 @@ describe('editing an existing equation', () => {
     expect(linearToOmml(editable), `${linear} → ${editable}`).toBe(xml);
     return editable;
   };
+  it('keeps each line of a displayed equation of several lines on its own line', () => {
+    const M = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"';
+    const word = `<m:oMathPara ${M}><m:oMath><m:r><m:t>a=b</m:t></m:r></m:oMath><m:oMath><m:r><m:t>c=d</m:t></m:r></m:oMath></m:oMathPara>`;
+    const editable = ommlToEditableLinear(word);
+    expect(editable).toBe('a=b\nc=d');
+    const rebuilt = linearToOmml(editable, { display: true });
+    expect(rebuilt.match(/<m:oMath>/g)).toHaveLength(2);
+    expect(ommlToEditableLinear(rebuilt)).toBe(editable);
+    // Typed in the dialog with Shift+Enter, too; in line with text, lines run together as before.
+    expect(linearToOmml('x=1\n\ny=2', { display: true }).match(/<m:oMath>/g)).toHaveLength(2);
+    expect(linearToOmml('x=1\ny=2')).toBe(linearToOmml('x=1 y=2'));
+  });
+
+  it('writes a function’s argument without brackets the argument did not have', () => {
+    expect(same('lim_(x→0) f(x)')).toBe('lim_(x→0) f(x)');
+    expect(same('max_i f(x)')).toBe('max_i f(x)');
+    expect(same('lim_(x→0) sin x')).toBe('lim_(x→0) sin x');
+    same('lim f(x)/g(x)');
+    same('sin x^2'); same('sin (a+b)'); same('sin^2 x');
+  });
+
+  it('writes a quoted word with a script as it was typed', () => {
+    expect(same('"x"^2')).toBe('"x"^2');
+    expect(same('"speed"_i')).toBe('"speed"_i');
+  });
+
   it('writes every structure in a form that builds it again', () => {
     for (const { linear } of EQUATION_GALLERY) same(linear);
     // Binomials, matrices and equation arrays stay themselves; roots keep their degree.

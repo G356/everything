@@ -4,7 +4,7 @@ import { unzipSync, strFromU8 } from 'fflate';
 import { DocxPackage, createDocx, WRITING_STYLES } from '../src/engine/docx.js';
 import { TextDocument, paragraph } from '../src/engine/model.js';
 import { bodyFieldRanges } from '../src/engine/body-fields.js';
-import { insertCaption, referenceTargets, insertCrossReference } from '../src/engine/captions.js';
+import { insertCaption, referenceTargets, insertCrossReference, captionLabels } from '../src/engine/captions.js';
 import { updateSequenceFields } from '../src/engine/field-update.js';
 import { footnoteOpeningRuns } from '../src/engine/footnotes.js';
 
@@ -32,6 +32,30 @@ describe('captions and cross-references', () => {
     expect(xml.match(/SEQ Figure \\\* ARABIC/g)).toHaveLength(2);
     const reopened = new TextDocument((await DocxPackage.open(await save(pkg, d))).paragraphs);
     expect(reopened.text).toBe(d.text);
+  });
+
+  it('numbers captions with a label in any script, as localized word processors write them (SEQ Рисунок)', async () => {
+    const { pkg, d } = await setup();
+    d.select(d.text.indexOf('Chart two')); insertCaption(d, { label: 'Рисунок', text: 'Схема' });
+    d.select(2); insertCaption(d, { label: 'Рисунок', text: 'Обзор' });
+    d.select(d.text.length); insertCaption(d, { label: '图表', text: 'Data' });
+    expect(d.text).toBe('Chart one\nРисунок 1: Обзор\nChart two\nРисунок 2: Схема\nConclusion\n图表 1: Data');
+    expect(bodyFieldRanges(d.paragraphs).map(r => r.field.instruction)).toEqual([' SEQ Рисунок \\* ARABIC ', ' SEQ Рисунок \\* ARABIC ', ' SEQ 图表 \\* ARABIC ']);
+    const reopened = new TextDocument((await DocxPackage.open(await save(pkg, d))).paragraphs);
+    expect(captionLabels(reopened)).toEqual(expect.arrayContaining(['Рисунок', '图表']));
+    expect(() => insertCaption(d, { label: '1st' })).toThrow();
+    expect(() => insertCaption(d, { label: 'Figure-A' })).toThrow();
+  });
+
+  it('puts a cross-reference inserted inside another one after it', async () => {
+    const { d } = await setup();
+    d.select(0, 5); d.addBookmark('First'); d.select(10, 15); d.addBookmark('Second');
+    const [first, second] = referenceTargets(d).bookmarks;
+    d.select(d.text.length); d.replace(' see '); insertCrossReference(d, first);
+    const ref = bodyFieldRanges(d.paragraphs)[0];
+    d.select(ref.start + 2); insertCrossReference(d, second);
+    expect(d.text.split('\n').at(-1)).toBe('Conclusion see ChartChart');
+    expect(bodyFieldRanges(d.paragraphs).map(r => [d.text.slice(r.start, r.end), r.parentId ?? null])).toEqual([['Chart', null], ['Chart', null]]);
   });
 
   it('inserts a cross-reference to a caption that follows renumbering', async () => {
@@ -62,6 +86,16 @@ describe('captions and cross-references', () => {
     expect(target.captionText).toBe('Second chart');
     for (const show of ['entire', 'caption', 'label']) { d.select(d.text.length); d.replace(` ${show}: `); insertCrossReference(d, target, { show }); }
     expect(d.text.split('\n').at(-1)).toBe('Conclusion entire: Figure 1: Second chart caption: Second chart label: Figure 1');
+    // Updating fields keeps the results as inserted, and refreshes them, without reporting them as unrefreshable.
+    const issues = [];
+    expect(updateSequenceFields(d, { onIssue: issue => issues.push(issue.message) })).toBe(0);
+    expect(issues).toEqual([]);
+    d.select(d.text.indexOf('Second\uFFFC') + 7); d.replace(' bar');
+    updateSequenceFields(d, { onIssue: issue => issues.push(issue.message) });
+    expect(issues).toEqual([]);
+    expect(d.text.split('\n').at(-1)).toBe('Conclusion entire: Figure 1: Second bar chart caption: Second bar chart label: Figure 1');
+    const at = d.text.indexOf('Second\uFFFC') + 7; d.select(at, at + 4); d.replace('');
+    updateSequenceFields(d);
     const bytes = new Uint8Array(await pkg.export(d.paragraphs, d.pageSettings, d.numbering, d.styles, d.tables, d.assets, { [path]: { paragraphs: note.paragraphs, tables: [] } }).arrayBuffer());
     expect(strFromU8(unzipSync(bytes)['word/document.xml'])).not.toContain('\uFFFC');
     const reopened = new TextDocument((await DocxPackage.open(bytes)).paragraphs);

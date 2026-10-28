@@ -27,13 +27,24 @@ async function pageField(type) {
 export function createReferences({ editor, pkg, error, base = {}, onChange = () => {} }) {
   const ready = () => { const engine = editor(); return engine && !pkg()?.readOnly ? engine : null; };
   const fail = e => { error(e); editor()?.focus(); };
+  /**
+   * New header and footer parts and document settings bypass the protection check every edit passes through:
+   * under Restrict Editing they are refused, as typing is.
+   */
+  const unprotected = what => { if (base.protectedDocument?.()) throw new Error(`This document is protected against editing, so ${what} cannot be changed. Stop protection under Review > Restrict Editing first.`); };
 
-  /** Which header/footer variant a page shows: first, even or default (§17.10.5). */
-  function variantFor(engine, page) {
-    const definition = engine.pageStories, section = engine.sectionOfPage(page);
-    const firstPage = engine.layout.pageSections?.indexOf(section) ?? 0;
+  /**
+   * Which header/footer variant a page shows: first, even or default (§17.10.5). Even and odd go by the
+   * page's number, as layout chooses them: a section numbered from 2 shows its even story on its first sheet.
+   */
+  async function variantFor(engine, page) {
+    const definition = engine.pageStories, section = engine.sectionOfPage(page), layout = engine.layout;
+    const firstPage = layout.pageSections?.indexOf(section) ?? 0;
     if (page === firstPage && definition?.sections[section]?.firstPageDifferent) return 'first';
-    return definition?.evenAndOdd && (page + 1) % 2 === 0 ? 'even' : 'default';
+    if (!definition?.evenAndOdd) return 'default';
+    const { pageNumberSequence } = await import('../engine/page-numbering.js');
+    const number = pageNumberSequence(layout.pageSections || [], definition, layout.numberingApproximations)[page] ?? page + 1;
+    return number % 2 === 0 ? 'even' : 'default';
   }
   const currentPage = engine => engine.session.path !== null ? engine.storyPage ?? 0 : engine.caretPageIndex ?? 0;
 
@@ -42,12 +53,13 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
     const engine = ready(); if (!engine) return null;
     engine.finishComposition();
     page ??= currentPage(engine);
-    const section = engine.sectionOfPage(page), variant = variantFor(engine, page);
+    const section = engine.sectionOfPage(page), variant = await variantFor(engine, page);
     const existing = engine.pageStories?.sections[section]?.[kind]?.[variant];
     if (existing) {
       if (!engine.pageStories.stories[existing]?.editable) throw new Error(`This document's ${kind} cannot be edited yet.`);
       engine.editStory(existing, page); return existing;
     }
+    unprotected(`its ${kind}s`);
     const { TextDocument, paragraph } = await import('../engine/model.js');
     const body = engine.session.body;
     const styleId = Object.values(body.styles.definitions || {}).find(s => s.type === 'paragraph' && s.name?.toLowerCase() === kind)?.id;
@@ -61,6 +73,7 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
   async function setStoryOption(option, on) {
     try {
       const engine = ready(); if (!engine) return;
+      unprotected('its headers and footers');
       const kind = activeStoryKind(), page = currentPage(engine), section = engine.sectionOfPage(page);
       if (option === 'first') { pkg().setTitlePage(section, on); engine.setStoryOptions({ section, firstPageDifferent: on }); }
       else { pkg().setEvenAndOdd(on); engine.setStoryOptions({ evenAndOdd: on }); }
@@ -127,12 +140,18 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
    * then refresh page references (all, or `result.only`). Returns the action's result. With `track`, text the
    * action inserts (a caption, a cross-reference) is then a tracked insertion when Track Changes is on.
    */
-  async function runBody(action, { modules = ['captions'], refresh = true, keepFocus = false, track = false } = {}) {
+  async function runBody(action, { modules = ['captions'], refresh = true, keepFocus = false, track = false, stay = null } = {}) {
     const engine = ready(); if (!engine) return false;
     engine.finishComposition();
-    if (engine.session.path !== null) engine.editStory(null);
     const [refreshModule, ...loaded] = await Promise.all([import('../engine/page-reference-refresh.js'), ...modules.map(name => ENGINE[name]())]);
     if (!pageLookupModule) pageLookupModule = await import('../engine/page-lookup.js');
+    if (!ready()) return false;
+    // From here to the end nothing waits, so no keystroke can arrive while the body is the open story. With `stay`,
+    // a header, footer or note open now is opened again with its caret where it is, and `stay(engine)` runs there:
+    // keys typed while the modules loaded went into it, and keys typed after go into it too.
+    engine.finishComposition();
+    const story = stay && engine.session.path !== null ? { path: engine.session.path, page: engine.storyPage, ...engine.model.selection } : null;
+    if (engine.session.path !== null) engine.editStory(null);
     const body = engine.session.body, tracking = body.trackChanges;
     body.trackChanges = false;
     let result;
@@ -149,12 +168,18 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
         if (refresh || result?.only) refreshModule.refreshPageReferences(body, model => engine.layoutModel(model), engine.pageStories, { checkpoint: false, only: result?.only || null });
         return result;
       });
-    } finally { body.trackChanges = tracking; }
+    } finally {
+      body.trackChanges = tracking;
+      if (story && engine.session.path === null && engine.editStory(story.path, story.page) && engine.session.path === story.path) {
+        engine.model.select(story.anchor, story.focus);
+        stay(engine);
+      }
+    }
     if (!keepFocus) engine.focus();
     onChange();
     return result;
   }
-  const ctx = { editor, pkg, error, ready, fail, runBody, pageOf, onChange: () => onChange(), showFieldCodes: () => base.showFieldCodes?.() };
+  const ctx = { editor, pkg, error, ready, fail, runBody, pageOf, unprotected, onChange: () => onChange(), showFieldCodes: () => base.showFieldCodes?.() };
   const toc = createTocCommands(ctx);
   const notes = createNoteCommands(ctx);
   const citations = createCitationCommands(ctx);
@@ -178,12 +203,27 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
   }
   /** Update every field this editor can evaluate: sequences, references, citations, bibliographies and page numbers. */
   async function updateAllFields() {
-    if (!ready()) return;
-    const { updateSequenceFields } = await import('../engine/field-update.js');
-    const issues = [], notesMaps = await noteNumberMaps();
-    await runBody(body => { updateSequenceFields(body, { onIssue: issue => issues.push(issue), notes: notesMaps }); return true; });
-    await citations.refreshFields();
-    if (issues.length) error(new Error([...new Set(issues.map(issue => issue.message))].join(' ')));
+    const engine = ready(); if (!engine) return;
+    engine.finishComposition();
+    engine.fieldUpdateRunning = true;
+    try {
+      const [{ updateSequenceFields }, { updateStoryFields, fieldEvaluationContext }] = await Promise.all([import('../engine/field-update.js'), import('../engine/field-results.js')]);
+      const issues = [], notesMaps = await noteNumberMaps(), citationsUpdate = await citations.refreshAction();
+      // Pressed in a header, footer or note, F9 updates the body's fields and stays there (runBody's `stay`): it
+      // used to leave the caret at the start of the body, and keys typed while it worked went into the body.
+      await runBody((body, fields) => {
+        updateSequenceFields(body, { onIssue: issue => issues.push(issue), notes: notesMaps });
+        citationsUpdate?.(body, fields);
+        return true;
+      }, { modules: ['bibliography'], stay: open => {
+        // The header's or footer's own fields (DATE, FILENAME…) update too; page numbers there follow pagination.
+        if (!open.model.paragraphs.some(p => p.runs.some(r => r.field))) return;
+        const { anchor, focus } = open.model.selection;
+        open.execute(() => updateStoryFields(open.model, { ...(fieldEvaluationContext() || {}), text: open.session.body.text }) > 0);
+        open.model.select(anchor, focus); open.revealCaret?.();
+      } });
+      if (issues.length) error(new Error([...new Set(issues.map(issue => issue.message))].join(' ')));
+    } finally { engine.fieldUpdateRunning = false; }
   }
 
   /* ---- Captions ---- */
@@ -210,10 +250,10 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
       preview.textContent = `${exclude.box.checked ? '' : `${label.value} `}${sample[format.value]}${t ? `${/^[\s:.\-–—]/.test(t) ? '' : ': '}${t}` : ''}`;
     }
     const newLabel = el('button.btn.btn-outline', { type: 'button', onclick: () => {
-      const input = text('New label', '', { required: true, maxLength: 40, pattern: '[A-Za-z][A-Za-z0-9 _]{0,39}' });
+      const input = text('New label', '', { required: true, maxLength: 40, pattern: '\\p{L}[\\p{L}\\p{M}\\p{N} _]{0,39}' });
       openDialog({ title: 'New Label', body: [field('Label', input, 'Letters, numbers and spaces, such as Chart or Plate.')], onSubmit: () => {
         const value = input.value.trim().replace(/\s+/g, ' ');
-        if (!/^[A-Za-z][A-Za-z0-9 _]{0,39}$/.test(value)) throw new Error('Start the label with a letter and use letters, numbers and spaces.');
+        if (!/^\p{L}[\p{L}\p{M}\p{N} _]{0,39}$/u.test(value)) throw new Error('Start the label with a letter and use letters, numbers and spaces.');
         saveLabels([...customLabels(), value]);
         label.replaceChildren(...labels().map(l => el('option', { value: l }, l))); label.value = value; sync();
       } });
@@ -301,14 +341,15 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
     const style = citations.styleControl();
     const styleWrap = el('label.ribbon-spin.ref-style-wrap', { title: 'Citation style' }, el('span.ribbon-spin-label', {}, 'Style:'), style.control);
     const bibliography = menuButton('Bibliography', 'bibliography', () => citations.bibliographyItems(focusEditor), { size: 'small', text: 'Bibliography' });
-    when(citation, () => !!ready()); when(manage, () => !!ready()); when(bibliography, () => !!ready());
+    // A citation or bibliography goes into the text: unavailable in a header, footer or note, as Cross-reference is.
+    when(citation, bodyReady); when(manage, () => !!ready()); when(bibliography, bodyReady);
     when(style.control, () => { style.sync(); return !!ready(); });
     // Captions
     const caption = command('Insert Caption', 'caption', () => captionDialog(), { size: 'large', text: 'Insert Caption' });
     const figures = command('Insert Table of Figures', 'tableOfFigures', () => toc.figuresDialog(), { text: 'Insert Table of Figures' });
     const updateFigures = command('Update Table of Figures', 'updateTable', () => toc.updateDialog(true), { text: 'Update Table' });
     const xref = command('Cross-reference', 'crossReference', () => crossReferenceDialog(), { text: 'Cross-reference' });
-    when(caption, () => !!ready()); when(figures, bodyReady); when(updateFigures, () => !!ready() && toc.hasFigures()); when(xref, bodyReady);
+    when(caption, bodyReady); when(figures, bodyReady); when(updateFigures, () => !!ready() && toc.hasFigures()); when(xref, bodyReady);
     // Index
     const markEntry = command('Mark Entry', 'markEntry', () => indexes.markEntryPanel(), { size: 'large', text: 'Mark Entry', shortcut: MOD_KEY === 'Cmd' ? 'Cmd+Option+Shift+X' : 'Alt+Shift+X' });
     const insertIndex = command('Insert Index', 'index', () => indexes.insertIndexDialog(), { text: 'Insert Index' });
@@ -339,8 +380,8 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
       { label: 'Cross-reference…', icon: 'crossReference', disabled: disabled || !body, onSelect: () => crossReferenceDialog() },
       { separator: true },
       { label: 'Footnote…', icon: 'footnote', disabled, onSelect: () => notes.notesDialog() },
-      { label: 'Caption…', icon: 'caption', disabled, onSelect: () => captionDialog() },
-      { label: 'Index and Tables', icon: 'toc', disabled, items: [
+      { label: 'Caption…', icon: 'caption', disabled: disabled || !body, onSelect: () => captionDialog() },
+      { label: 'Index and Tables', icon: 'toc', disabled: disabled || !body, items: [
         { label: 'Index…', icon: 'index', onSelect: () => indexes.insertIndexDialog() },
         { label: 'Table of Contents…', icon: 'toc', onSelect: () => toc.customDialog() },
         { label: 'Table of Figures…', icon: 'tableOfFigures', onSelect: () => toc.figuresDialog() },
@@ -415,6 +456,22 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
     close.classList.add('ribbon-wide'); // 'Close Header and Footer' in two lines
     for (const b of [header, footer, goHeader, goFooter, close]) b.addEventListener('mousedown', e => e.preventDefault());
     when(goHeader, () => activeStoryKind() !== 'header'); when(goFooter, () => activeStoryKind() !== 'footer');
+    // Header and footer distances belong to the section whose header or footer is edited (the body's last
+    // section had them before, so in a document of several sections the change landed on another section).
+    const sectionSettings = engine => { const body = engine?.session.body; return body?.sectionSettings?.[engine.sectionOfPage(currentPage(engine))] || body?.pageSettings; };
+    const shown = key => String(Math.round((sectionSettings(editor())?.[key] ?? 720) / IN * 100) / 100);
+    function setDistance(key, value) {
+      const engine = ready(); if (!engine) return;
+      engine.finishComposition();
+      const story = engine.session.path, page = currentPage(engine), section = engine.sectionOfPage(page), { anchor, focus } = engine.model.selection;
+      // Sections are the body's: apply there, then return to the header or footer with the caret where it was.
+      if (story !== null) engine.editStory(null);
+      let failure = null;
+      engine.execute(() => engine.model.setPageSettings({ [key]: value }, { scope: 'section', section }), e => { failure = e; }, undefined, true);
+      if (story !== null && engine.editStory(story, page) && engine.session.path === story) engine.model.select(anchor, focus);
+      if (failure) fail(failure);
+      onChange();
+    }
     const distance = (key, label) => {
       const input = document.createElement('input');
       Object.assign(input, { type: 'number', step: 0.05, min: 0, max: 22, className: 'canvas-spacing ribbon-number' });
@@ -423,14 +480,14 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
         // The arrows step by 0.05, but any distance in range is accepted, as Page Setup accepts it.
         const v = input.validity;
         const engine = ready(); if (!engine || input.value === '' || v.badInput || v.rangeOverflow || v.rangeUnderflow) { input.reportValidity(); return; }
-        try { engine.finishComposition(); engine.setPageSettings({ [key]: Math.round(Number(input.value) * IN) }); } catch (e) { fail(e); }
+        try { setDistance(key, Math.round(Number(input.value) * IN)); } catch (e) { fail(e); }
       });
       input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); input.dispatchEvent(new Event('change')); editor()?.focus(); } });
       when(input, () => !!ready());
-      kit.states?.push?.({ control: input, enabled: () => !!ready(), value: () => Math.round((editor()?.session.body.pageSettings[key] ?? 720) / IN * 100) / 100 });
+      kit.states?.push?.({ control: input, enabled: () => !!ready(), value: () => Number(shown(key)) });
       const wrap = document.createElement('label'); wrap.className = 'ribbon-spin'; wrap.title = label;
       wrap.append(commandIconEl(key === 'header' ? 'spaceBefore' : 'spaceAfter', 16), Object.assign(document.createElement('span'), { className: 'ribbon-spin-label', textContent: label }), input, Object.assign(document.createElement('span'), { className: 'ribbon-spin-unit', textContent: 'in' }));
-      input.value = String(Math.round((editor()?.session.body.pageSettings[key] ?? 720) / IN * 100) / 100);
+      input.value = shown(key);
       return { wrap, input };
     };
     const top = distance('header', 'Header from Top'), bottom = distance('footer', 'Footer from Bottom');
@@ -439,7 +496,7 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
     const definition = () => editor()?.pageStories;
     const firstPage = kit.check('Different First Page', () => !!definition()?.sections[editor()?.sectionOfPage(currentPage(editor())) ?? 0]?.firstPageDifferent, on => setStoryOption('first', on));
     const oddEven = kit.check('Different Odd & Even Pages', () => !!definition()?.evenAndOdd, on => setStoryOption('evenOdd', on));
-    const sync = () => { const p = editor()?.session.body.pageSettings; if (!p) return; for (const [d, key] of [[top, 'header'], [bottom, 'footer']]) if (document.activeElement !== d.input) d.input.value = String(Math.round(p[key] / IN * 100) / 100); };
+    const sync = () => { if (!editor()) return; for (const [d, key] of [[top, 'header'], [bottom, 'footer']]) if (document.activeElement !== d.input) d.input.value = shown(key); };
     when(close, () => { sync(); return true; });
     return [{ id: 'headerFooter', label: 'Header & Footer', contextual: 'headerFooter', selectOnAppear: true, groups: [
       { id: 'hfHeaderFooter', label: 'Header & Footer', icon: 'header', priority: 6, items: [header, footer, pageNumber] },

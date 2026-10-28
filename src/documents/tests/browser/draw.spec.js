@@ -297,3 +297,68 @@ test('draws with touch on a phone-width window', async ({ browser }, info) => {
   expect(errors).toEqual([]);
   await context.close();
 });
+
+test('erasing or deleting every stroke in a drawing canvas keeps the empty canvas', async ({ page }) => {
+  test.setTimeout(120000);
+  const { input, errors, ribbon } = await start(page, { text: 'Canvas below.' });
+  // The canvas is the document's only object once the session has put the ink into it.
+  const canvases = () => objects(input);
+  await ribbon.getByRole('button', { name: 'Drawing Canvas', exact: true }).click();
+  await expect.poll(canvases).toBe(1);
+  const box = await page.locator('canvas.canvas-page').first().boundingBox();
+  await draw(page, box, wave(150, 200, 20, 10, 25));
+  await ribbon.getByRole('button', { name: 'Eraser', exact: true }).click();
+  await expect.poll(() => objects(input)).toBe(1);
+  // The stroke eraser takes the only stroke: the canvas stays, empty.
+  await draw(page, box, [[150 + 60, 160], [150 + 60, 240]]);
+  await expect.poll(() => inkAt(page, 150 + 60, 200 + Math.sin(2) * 25)).toBe(0);
+  await expect.poll(canvases).toBe(1);
+  await input.press('ControlOrMeta+z');
+  await expect.poll(() => inkAt(page, 150 + 60, 200 + Math.sin(2) * 25)).toBeGreaterThan(0);
+  // Lasso-selected and deleted: the canvas stays too.
+  await ribbon.getByRole('button', { name: 'Lasso Select', exact: true }).click();
+  await draw(page, box, loop(130, 150, 230, 110));
+  await page.keyboard.press('Delete');
+  await expect.poll(() => inkAt(page, 150 + 60, 200 + Math.sin(2) * 25)).toBe(0);
+  await expect.poll(canvases).toBe(1);
+  expect(errors).toEqual([]);
+});
+
+test('ink drawn on a page where no paragraph starts stays on that page', async ({ page }) => {
+  test.setTimeout(120000);
+  // One long paragraph running onto page 2, then a table that fills pages of its own.
+  const { input, errors, ribbon } = await start(page, { text: 'Words that run on and on across the page. '.repeat(160) });
+  await input.press('ControlOrMeta+End');
+  await input.press('Enter');
+  await onTab(page, 'insert');
+  await page.locator('#ribbon-panel-insert').getByRole('button', { name: 'Insert table', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Insert Table…' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Insert Table' });
+  await dialog.getByLabel('Number of columns').fill('2'); await dialog.getByLabel('Number of rows').fill('120');
+  await dialog.getByRole('button', { name: 'OK' }).click();
+  await expect.poll(() => page.locator('canvas.canvas-page').count()).toBeGreaterThanOrEqual(4);
+  await onTab(page, 'draw');
+  await ribbon.locator('.draw-pen').first().click();
+  // Pixels that are not white around a point of a page canvas.
+  const marked = (index, x, y) => page.evaluate(([index, x, y]) => {
+    const c = document.querySelectorAll('canvas.canvas-page')[index], ctx = c.getContext('2d'), s = c.width / c.getBoundingClientRect().width;
+    const d = ctx.getImageData(Math.round((x - 60) * s), Math.round((y - 30) * s), Math.round(120 * s), Math.round(60 * s)).data;
+    let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] < 200 || d[i + 1] < 200 || d[i + 2] < 200) n++; return n;
+  }, [index, x, y]);
+  const inkOn = async index => {
+    const canvas = page.locator('canvas.canvas-page').nth(index);
+    await canvas.scrollIntoViewIfNeeded();
+    const box = await canvas.boundingBox(), before = await objects(input), plain = await marked(index, 375, 420);
+    await draw(page, box, wave(300, 420, 16, 10, 20));
+    await ribbon.getByRole('button', { name: 'Select', exact: true }).click();
+    await expect.poll(() => objects(input)).toBe(before + 1);
+    // The ink shows where it was drawn: on this page, not on the page its paragraph starts on.
+    await canvas.scrollIntoViewIfNeeded();
+    await expect.poll(() => marked(index, 375, 420)).toBeGreaterThan(plain + 100);
+    await ribbon.locator('.draw-pen').first().click();
+  };
+  await inkOn(1); // the long paragraph continues here
+  await inkOn(3); // only table rows here
+  await expect(page.getByText(/Ink needs a paragraph/)).toHaveCount(0);
+  expect(errors).toEqual([]);
+});

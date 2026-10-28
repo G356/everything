@@ -8,11 +8,22 @@ import { documentBlocks } from '../engine/tables.js';
 import { listKind, listMarkers, levelFor } from '../engine/numbering.js';
 import { TextDocument } from '../engine/model.js';
 import { hasRevisions } from '../engine/revisions.js';
+import { bodySymbolText } from '../engine/body-symbols.js';
 
 const OBJECT = '￼';
 const escapeHtml = text => String(text).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-// Hidden text is neither shown nor printed, so a downloaded or published copy leaves it out too.
-const runText = run => run.vanish ? '' : String(run.text || '').replace(new RegExp(OBJECT, 'g'), '');
+// Hidden text is neither shown nor printed, so a downloaded or published copy leaves it out too. An object stands
+// for text of its own, as copying it gives: an equation its text, a field its result, a symbol its character (one
+// in a symbol font's private range would read as an empty box without that font, so it goes). Pictures go.
+const PRIVATE_USE = /[\ue000-\uf8ff]/;
+function objectText(run) {
+  if (run.image) return '';
+  if (run.bodySymbol) { const symbol = bodySymbolText(run, ''); return PRIVATE_USE.test(symbol) ? '' : symbol; }
+  if (run.math) return run.math.text || '';
+  if (run.field) return run.field.cachedText || '';
+  return '';
+}
+const runText = run => run.vanish ? '' : run.text === OBJECT ? objectText(run).replace(/[\u0000-\u0008\u000b-\u001f]/g, '') : String(run.text || '').replace(new RegExp(OBJECT, 'g'), '');
 
 /** A heading level 1–6 from a paragraph's style, or 0. */
 export function headingLevel(p, styles) {
@@ -113,24 +124,32 @@ function blocksHtml(blocks, model, numbers = itemNumbers(model), markers = itemM
     }
     const p = paragraphOf(block), level = headingLevel(p, model.styles);
     const kind = level ? null : kindOf(p, model.numbering), tag = kind === 'bullet' ? 'ul' : kind ? 'ol' : null;
+    let value = null;
     if (!tag) closeLists();
     else {
       const depth = listLevel(p);
       while (lists.length && lists.at(-1).depth > depth) closeList();
       if (lists.at(-1)?.depth === depth && lists.at(-1).tag !== tag) closeList();
-      if (lists.at(-1)?.depth === depth) html += '</li>';
-      else {
-        const start = tag === 'ol' ? numbers.get(p) ?? 1 : 1;
+      const number = tag === 'ol' ? numbers.get(p) : null;
+      if (lists.at(-1)?.depth === depth) {
+        html += '</li>';
+        // An item numbered again part-way through (Restart Numbering, Set Numbering Value) says its number; a browser
+        // would number it one past the item before.
+        const list = lists.at(-1);
+        if (tag === 'ol' && number != null && number !== list.number + 1) value = number;
+        list.number = number ?? list.number + 1;
+      } else {
+        const start = number ?? 1;
         // A list numbered with letters or Roman numerals keeps them: "see (b)" still finds item b.
         const type = tag === 'ol' ? LIST_TYPES[(() => { try { return levelFor(model.numbering, p.list).format; } catch { return null; } })()] : null;
         html += `<${tag}${type ? ` type="${type}"` : ''}${start !== 1 ? ` start="${start}"` : ''}>`;
-        lists.push({ tag, depth });
+        lists.push({ tag, depth, number: start });
       }
     }
     const inner = escapeHtml(headingNumber(p, level, markers)) + p.runs.map(run => runHtml(run, !!level)).join('') || '<br>';
     const alignment = p.format?.alignment;
     const align = ['center', 'right', 'both'].includes(alignment) ? ` style="text-align:${alignment === 'both' ? 'justify' : alignment}"` : '';
-    html += tag ? `<li${align}>${inner}` : level ? `<h${level}${align}>${inner}</h${level}>` : `<p${align}>${inner}</p>`;
+    html += tag ? `<li${value != null ? ` value="${value}"` : ''}${align}>${inner}` : level ? `<h${level}${align}>${inner}</h${level}>` : `<p${align}>${inner}</p>`;
   }
   closeLists();
   return html;
@@ -276,7 +295,9 @@ function blocksMarkdown(blocks, model) {
   for (const block of blocks) {
     if (block.type === 'table') {
       // Text already escapes its pipes (and link targets encode theirs), so none ends a cell early.
-      const rows = tableRows(block, cell => cellText(cell, p => paragraphMarkdown(p, false, '<br>'), ' \\| ', '<br>')).map(row => row.map(text => text || ' '));
+      // A cell cannot hold a Markdown list: an item keeps its number or bullet as text, as in plain text.
+      const item = p => markers.has(p) ? mdEscape(markers.get(p).replace(/\t$/, ' ')) : '';
+      const rows = tableRows(block, cell => cellText(cell, p => item(p) + paragraphMarkdown(p, false, '<br>'), ' \\| ', '<br>')).map(row => row.map(text => text || ' '));
       if (rows.length) {
         const width = Math.max(...rows.map(r => r.length));
         const pad = r => [...r, ...Array(width - r.length).fill(' ')];
@@ -294,12 +315,17 @@ function blocksMarkdown(blocks, model) {
       let list = lists.at(-1);
       if (list?.depth !== depth) { list = { depth, indent: list ? list.content : 0, kind: null, number: 0 }; lists.push(list); }
       const number = numbers.get(p) ?? (list.kind === kind ? list.number + 1 : 1);
+      // CommonMark takes a list's number from its first item alone: an item numbered again part-way through
+      // (Restart Numbering, Set Numbering Value) starts a list of its own, after a comment that ends the one before.
+      const restarted = previousList && kind !== 'bullet' && list.kind && list.kind !== 'bullet' && number !== list.number + 1;
       Object.assign(list, { kind, number });
       const marker = kind === 'bullet' ? '-' : `${number}.`, indent = ' '.repeat(list.indent);
       list.content = list.indent + marker.length + 1;
       // A line after a break is indented to the item's text, so it stays in the item.
       const line = `${indent}${marker} ${text.replace(/\n/g, `\n${' '.repeat(list.content)}`)}`;
-      if (previousList) out[out.length - 1] += `\n${line}`; else out.push(line);
+      if (restarted && !list.indent) out.push('<!-- -->', line);
+      else if (restarted) out[out.length - 1] += `\n\n${indent}<!-- -->\n\n${line}`;
+      else if (previousList) out[out.length - 1] += `\n${line}`; else out.push(line);
       previousList = kind;
       continue;
     }

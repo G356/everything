@@ -92,3 +92,25 @@ it('inserts an = field with its result, updates it with Update Fields and round-
   expect(textAt(reopened, 3, 1)).toBe('25.00');
   expect(bodyFieldRanges(reopened.paragraphs)[0].field.type).toBe('=');
 });
+
+it('reads cells as they read with tracked changes accepted: deleted text does not count', () => {
+  const { doc } = sheet();
+  // A reviewer retypes Q1's 10 as 7 with Track Changes on: "10" stays as a deletion beside "7".
+  const p = doc.paragraphs.find(x => x.cellId === cellAt(doc, 1, 1).id), start = doc.paragraphOffset(doc.paragraphs.indexOf(p));
+  doc.trackChanges = true; doc.revisionAuthor = 'Reviewer';
+  doc.select(start, start + 2); doc.replace('7');
+  doc.trackChanges = false;
+  expect(p.runs.some(r => r.revision?.type === 'del')).toBe(true);
+  expect(evaluateFormula(doc, '=SUM(ABOVE)', cellAt(doc, 3, 1).id)).toBe('12');
+  expect(evaluateFormula(doc, '=B2*2', cellAt(doc, 3, 1).id)).toBe('14');
+});
+
+it('ROUND rounds halves away from zero, at the decimal places typed', () => {
+  const { doc } = sheet();
+  const at = cellAt(doc, 3, 1).id;
+  expect(['=ROUND(-2.5,0)', '=ROUND(2.5,0)', '=ROUND(1.005,2)', '=ROUND(-1.005,2)', '=ROUND(1234.5,-2)', '=ROUND(0.125,2)'].map(f => evaluateFormula(doc, f, at))).toEqual(['-3', '3', '1.01', '-1.01', '1200', '0.13']);
+});
+
+it('reads only parentheses around a cell’s leading number as negative', () => {
+  expect([cellNumber('100 (20)'), cellNumber('12 boxes (spare)'), cellNumber('(30)'), cellNumber('( $1,200.50 )'), cellNumber('(30) returned'), cellNumber('(30')]).toEqual([100, 12, -30, -1200.5, -30, 30]);
+});

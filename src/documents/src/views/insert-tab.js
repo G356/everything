@@ -23,7 +23,8 @@ import { readDrawingFragment, placeDrawing, freshDrawingAssetId, nextDrawingId, 
 import { pictureFragment, fittedSize } from '../engine/picture-insert.js';
 import { imageInfo, MAX_IMAGE_SIDE, MAX_IMAGE_PIXELS } from '../engine/images.js';
 import { diagramDrawingXml, parseDiagramDescription, DIAGRAM_LAYOUTS } from '../engine/diagram-builder.js';
-import { insertBodyField, fieldInstruction, evaluateField, documentProperties, setFieldContextProvider, DOCUMENT_PROPERTY_NAMES, formatDatePicture } from '../engine/field-results.js';
+import { insertBodyField, fieldInstruction, evaluateField, packageDocumentProperties, setFieldContextProvider, DOCUMENT_PROPERTY_NAMES, formatDatePicture } from '../engine/field-results.js';
+import { pageNumberSequence } from '../engine/page-numbering.js';
 import { linearToOmml, ommlToLinear, ommlToEditableLinear, EQUATION_GALLERY } from '../engine/math-linear.js';
 import { ommlToMathml } from '../engine/omml-mathml.js';
 import { dropCapState, setDropCap } from '../engine/drop-caps.js';
@@ -41,8 +42,12 @@ export async function rasterize(blob, max = 1600, { pixels = Infinity, type = 'i
     const img = new Image(); img.src = url;
     try { await img.decode(); } catch { throw new Error('The picture could not be read. Choose a PNG, JPEG, GIF, WebP, BMP, TIFF or SVG image.'); }
     let width = img.naturalWidth || 300, height = img.naturalHeight || 150;
-    const scale = Math.min(1, max / Math.max(width, height), Math.sqrt(pixels / (width * height))); width = Math.max(1, Math.round(width * scale)); height = Math.max(1, Math.round(height * scale));
-    if (width * height > pixels) { width = Math.max(1, Math.floor(width * scale)); height = Math.max(1, Math.floor(height * scale)); }
+    const scale = Math.min(1, max / Math.max(width, height), Math.sqrt(pixels / (width * height))), natural = { width, height };
+    width = Math.max(1, Math.round(width * scale)); height = Math.max(1, Math.round(height * scale));
+    // Rounding up can overshoot the pixel limit by a few pixels: round the scaled size down instead (from
+    // the picture's own size, not the already scaled one), and trim a pixel from the longer side if still over.
+    if (width * height > pixels) { width = Math.max(1, Math.floor(natural.width * scale)); height = Math.max(1, Math.floor(natural.height * scale)); }
+    while (width * height > pixels && Math.max(width, height) > 1) { if (width >= height) width--; else height--; }
     const canvas = Object.assign(document.createElement('canvas'), { width, height });
     canvas.getContext('2d').drawImage(img, 0, 0, width, height);
     const encoded = await new Promise((resolve, reject) => canvas.toBlob(b => b ? resolve(b) : reject(new Error('The picture could not be converted.')), type, quality));
@@ -83,14 +88,21 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
     const twips = box ? box.width * 15 - context.cell.margins.left - context.cell.margins.right : p.width - p.left - p.right - (p.gutterAtTop ? 0 : p.gutter || 0);
     return Math.max(box ? EMU_PER_INCH / 2 : EMU_PER_INCH, twips * TWIP_EMU);
   };
-  const title = () => documentProperties(pkg()?.parts || {}).title || String(docName() || '').replace(/\.docx$/i, '') || 'Document Title';
+  const title = () => packageDocumentProperties(pkg()).title || String(docName() || '').replace(/\.docx$/i, '') || 'Document Title';
   const today = () => new Intl.DateTimeFormat(undefined, { dateStyle: 'long' }).format(new Date());
   /** Run an editor transaction, reporting failures; returns whether it applied. */
   const run = (engine, action) => { let failure = null; const ok = engine.execute(action, e => { failure = e; }); if (failure) fail(failure); engine.focus(); if (ok) onChange(); return ok; };
+  /** The number the caret's page shows ({ page, pageFormat }): its section's start and format apply, as in headers and footers. */
+  const caretPageNumber = engine => {
+    const index = engine?.caretPageIndex ?? 0, layout = engine?.layout;
+    if (!layout) return { page: index + 1 };
+    const numbers = pageNumberSequence(layout.pageSections || [], engine.pageStories, layout.numberingApproximations);
+    return { page: numbers[index] ?? index + 1, pageFormat: engine.pageStories?.sections?.[engine.sectionOfPage(index)]?.pageNumbering?.format };
+  };
   const fieldContext = () => {
     const engine = editor();
-    return { now: new Date(), properties: documentProperties(pkg()?.parts || {}), fileName: /\.\w+$/.test(docName() || '') ? docName() : `${docName() || 'Document'}.docx`, user: { name: user() || '' },
-      pages: engine?.layout?.pageCount, page: (engine?.caretPageIndex ?? 0) + 1 };
+    return { now: new Date(), properties: packageDocumentProperties(pkg()), fileName: /\.\w+$/.test(docName() || '') ? docName() : `${docName() || 'Document'}.docx`, user: { name: user() || '' },
+      pages: engine?.layout?.pageCount, ...caretPageNumber(engine) };
   };
   setFieldContextProvider(fieldContext);
 
@@ -242,7 +254,9 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
       const canvas = start.canvas, box = canvas.getBoundingClientRect(), zoom = engine.zoom || 1, r = rectOf(start, e), dragged = r.width > 4 || r.height > 4;
       const position = engine.point(start.event, false), page = Number(canvas.dataset.page);
       const px = v => Math.round(v / zoom * 9525);
-      const result = { page, position, dragged, x: px(r.left - box.left), y: px(r.top - box.top), width: px(r.width), height: px(r.height) };
+      // Which way the drag went: a line runs from where it started to where it ended.
+      const result = { page, position, dragged, x: px(r.left - box.left), y: px(r.top - box.top), width: px(r.width), height: px(r.height), flipH: e.clientX < start.clientX, flipV: e.clientY < start.clientY,
+        straight: { x: r.width <= 4, y: r.height <= 4 } };
       cancelDrawing(); done(result);
     };
     const key = e => { if (e.key === 'Escape' && !isComposing(e)) { e.preventDefault(); e.stopPropagation(); cancelDrawing(); engine.focus(); } };
@@ -255,9 +269,13 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
     const [, name, , w, h] = entry, line = LINE_PRESETS.has(preset), open = UNFILLED_PRESETS.has(preset);
     return insertDrawing((engine, id, order) => {
       if (rect) { engine.model.select(rect.position); }
-      const width = rect?.dragged ? Math.max(9525 * 4, rect.width) : Math.round(w * EMU_PER_INCH), height = line ? 0 : rect?.dragged ? Math.max(9525 * 4, rect.height) : Math.round(h * EMU_PER_INCH);
+      // A dragged line goes from the drag's start to its end; one within a few pixels of an axis is straight along it.
+      const drawnLine = line && rect?.dragged;
+      const width = drawnLine ? (rect.straight.x ? 0 : rect.width) : rect?.dragged ? Math.max(9525 * 4, rect.width) : Math.round(w * EMU_PER_INCH);
+      const height = drawnLine ? (rect.straight.y ? 0 : rect.height) : line ? 0 : rect?.dragged ? Math.max(9525 * 4, rect.height) : Math.round(h * EMU_PER_INCH);
+      const flips = drawnLine ? { flipH: !!width && rect.flipH, flipV: !!height && rect.flipV } : {};
       const anchor = rect ? { horizontal: 'page', vertical: 'page', x: rect.x, y: rect.y, wrap: 'none', behind: false, order } : { horizontal: 'column', vertical: 'paragraph', x: 0, y: 0, wrap: 'none', behind: false, order };
-      return sceneFragment(engine, shapeDrawingXml({ id, name: `${name} ${id}`, preset, width, height, fill: line || open ? null : DEFAULT_SHAPE_STYLE.fill, line: line || open ? DEFAULT_SHAPE_STYLE.fill : DEFAULT_SHAPE_STYLE.line, lineWidth: DEFAULT_SHAPE_STYLE.lineWidth, anchor }));
+      return sceneFragment(engine, shapeDrawingXml({ id, name: `${name} ${id}`, preset, width, height, fill: line || open ? null : DEFAULT_SHAPE_STYLE.fill, line: line || open ? DEFAULT_SHAPE_STYLE.fill : DEFAULT_SHAPE_STYLE.line, lineWidth: DEFAULT_SHAPE_STYLE.lineWidth, anchor, ...flips }));
     });
   }
   function openShapes(anchor, event) {
@@ -367,7 +385,7 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
       return;
     }
     // In the body, PAGE and NUMPAGES are body fields showing their current values.
-    const page = String((engine.caretPageIndex ?? 0) + 1), pages = String(engine.layout.pageCount);
+    const context = fieldContext(), page = evaluateField(fieldInstruction({ name: 'PAGE', preserve: true }), context) ?? String(context.page), pages = String(engine.layout.pageCount);
     run(engine, () => {
       for (const part of design.parts) {
         if (typeof part === 'object' && part.field) insertBodyField(engine.model, fieldInstruction({ name: part.field, preserve: true }), part.field === 'PAGE' ? page : pages);
@@ -404,6 +422,8 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
     engine.finishComposition();
     const page = engine.session.path !== null ? engine.storyPage ?? 0 : engine.caretPageIndex ?? 0, section = engine.sectionOfPage(page);
     openFormatPageNumbers({ current: engine.pageStories?.sections?.[section]?.pageNumbering || {}, onClose: () => queueMicrotask(() => editor()?.focus()), onApply: ({ format, start }) => {
+      // Page numbering is a section setting no protected edit check sees: refused under Restrict Editing.
+      if (base.protectedDocument?.()) throw new Error('This document is protected against editing, so its page numbering cannot be changed. Stop protection under Review > Restrict Editing first.');
       const value = format === 'decimal' && start === null ? null : { format, ...(start !== null ? { start } : {}) };
       pkg().setPageNumbering(section, value);
       engine.setStoryOptions({ section, pageNumbering: value });
@@ -412,8 +432,11 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
   }
   function removePageNumbers() {
     const engine = ready(); if (!engine) return;
+    // The section of the header or footer being edited, else of the caret: the caret's last place in the text may be
+    // in another section.
+    const page = engine.session.path !== null ? engine.storyPage ?? 0 : engine.caretPageIndex ?? 0;
     toBody(engine);
-    const page = engine.caretPageIndex ?? 0, section = engine.pageStories?.sections?.[engine.sectionOfPage(page)];
+    const section = engine.pageStories?.sections?.[engine.sectionOfPage(page)];
     const paths = [...new Set(['header', 'footer'].flatMap(kind => Object.values(section?.[kind] || {})))].filter(path => engine.pageStories.stories[path]?.editable);
     let removed = 0;
     for (const path of paths) {
@@ -516,14 +539,14 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
     openFieldDialog({ context: { ...fieldContext(), text: engine.model.text }, bookmarks: (engine.bookmarks || []).map(b => b.name).filter(n => !n.startsWith('_')), onClose: () => queueMicrotask(() => editor()?.focus()),
       onInsert: ({ name, instruction }) => {
         const engine = ready(); if (!engine) return;
-        const cached = name === 'PAGE' ? String((engine.caretPageIndex ?? 0) + 1) : name === 'SEQ' ? '1' : name === 'REF' ? (() => { const target = /REF\s+"?([^"\s]+)/.exec(instruction)?.[1], mark = engine.bookmarks.find(b => b.name === target); return mark ? engine.model.text.slice(mark.start, mark.end) : ''; })() : null;
+        const cached = name === 'SEQ' ? '1' : name === 'REF' ? (() => { const target = /REF\s+"?([^"\s]+)/.exec(instruction)?.[1], mark = engine.bookmarks.find(b => b.name === target); return mark ? engine.model.text.slice(mark.start, mark.end) : ''; })() : null;
         insertFieldInstruction(instruction, cached);
         // A new sequence or reference number settles when fields update, as captions do.
         if (name === 'SEQ' || name === 'REF') base.updateFields?.();
       } });
   }
   const propertyField = (label, key) => {
-    const value = documentProperties(pkg()?.parts || {})[key];
+    const value = packageDocumentProperties(pkg())[key];
     insertFieldInstruction(fieldInstruction({ name: 'DOCPROPERTY', argument: label }), value || `[${label}]`);
   };
   const autoTextKey = () => `${AUTOTEXT_KEY}.${user() || 'local'}`;
@@ -558,7 +581,7 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
         ...(entries.length ? [{ label: 'Delete Entry', items: entries.map(entry => ({ label: entry.name, onSelect: async () => {
           if (await confirmDialog({ title: 'Delete AutoText?', message: `Delete “${entry.name}” from your AutoText gallery?`, confirmLabel: 'Delete' })) saveAutoTexts(autoTexts().filter(e => e.name !== entry.name));
         } })) }] : [])] },
-      { label: 'Document Property', disabled: !engine, items: DOCUMENT_PROPERTY_NAMES.map(([label, key]) => ({ label: label === 'LastSavedBy' ? 'Last Saved By' : label, hint: documentProperties(pkg()?.parts || {})[key] || 'Empty', onSelect: () => propertyField(label, key) })) },
+      { label: 'Document Property', disabled: !engine, items: DOCUMENT_PROPERTY_NAMES.map(([label, key]) => ({ label: label === 'LastSavedBy' ? 'Last Saved By' : label, hint: packageDocumentProperties(pkg())[key] || 'Empty', onSelect: () => propertyField(label, key) })) },
       { label: 'Field…', icon: 'field', disabled: !engine, onSelect: insertField },
     ];
   }
@@ -591,7 +614,7 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
           // Without formatting (in a table cell, or a document with notes or fields) a web page's or Markdown file's
           // text goes in as its paragraphs, not as the markup: the raw text content of a page runs paragraphs
           // together and includes the text of scripts and styles, and Markdown would show its # and ** marks.
-          const converted = htmlFragment(kind === 'markdown' ? (await import('../lib/markdown-html.js')).markdownHtml(raw) : raw);
+          const converted = htmlFragment(kind === 'markdown' ? (await import('../lib/markdown-html.js')).markdownHtml(raw) : raw, { copied: false });
           fragment = formatted ? converted : null;
           text = converted ? converted.paragraphs.map(p => p.text).join('\n') : '';
         }
@@ -619,6 +642,8 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
     const engine = ready(); if (!engine) return;
     engine.finishComposition();
     const xml = linearToOmml(linear, { display }), text = (ommlToLinear(xml) || linear).replace(/\s+/g, ' ').trim() || 'Equation';
+    // A new equation goes after a selected picture or shape, as a new drawing does, rather than replacing it.
+    afterSelectedDrawing(engine);
     run(engine, () => {
       const model = engine.model;
       if (display) {

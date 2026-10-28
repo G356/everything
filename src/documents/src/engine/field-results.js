@@ -4,12 +4,14 @@
 // document statistics (NUMPAGES, NUMWORDS, NUMCHARS) and the general formatting switch (§17.16.4.3).
 // A field is inserted with its current result as cached text, so every consumer shows it at once;
 // Update Field recomputes it from the same evaluator.
-import { fieldInstructionTokens } from './docx-page-fields.js';
+import { fieldInstructionTokens, pageFieldSegments, writePageFieldResult } from './docx-page-fields.js';
+import { serializeFragment } from './docx-compatibility.js';
 import { formatPageNumber } from './page-numbering.js';
 import { newBodyField } from './toc.js';
 import { bodyFieldRanges, newFieldEndOrder } from './body-fields.js';
 import { sharedRevision } from './revisions.js';
 import { countWords } from '../core/text.js';
+import { readCoreProperties } from './docx-core-properties.js';
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -72,15 +74,21 @@ export function applyGeneralFormat(text, format) {
   return text;
 }
 
-/** Core and extended document properties from a package's parts: { title, subject, author, keywords, comments, lastModifiedBy, category, created, modified, company, manager, … }. */
-export function documentProperties(parts = {}) {
+/**
+ * Core and extended document properties from a package's parts: { title, subject, author, keywords, comments, lastModifiedBy, category, created, modified, company, manager, … }.
+ * Core properties come from the part the package relationship names (Part 2 §11); `core`, when given, holds
+ * them with this session's edits (DocxPackage#coreProperties).
+ */
+export function documentProperties(parts = {}, core = readCoreProperties(parts)) {
   const read = path => { const bytes = parts[path]; if (!bytes) return null; try { return new DOMParser().parseFromString(typeof bytes === 'string' ? bytes : new TextDecoder().decode(bytes), 'application/xml'); } catch { return null; } };
   const text = (doc, name) => [...(doc?.documentElement?.children || [])].find(n => n.localName === name)?.textContent?.trim() || '';
-  const core = read('docProps/core.xml'), app = read('docProps/app.xml');
-  return { title: text(core, 'title'), subject: text(core, 'subject'), author: text(core, 'creator'), keywords: text(core, 'keywords'), comments: text(core, 'description'),
-    lastModifiedBy: text(core, 'lastModifiedBy'), category: text(core, 'category'), status: text(core, 'contentStatus'), created: text(core, 'created'), modified: text(core, 'modified'),
+  const app = read('docProps/app.xml');
+  return { title: core.title || '', subject: core.subject || '', author: core.creator || '', keywords: core.keywords || '', comments: core.description || '',
+    lastModifiedBy: core.lastModifiedBy || '', category: core.category || '', status: core.contentStatus || '', created: core.created || '', modified: core.modified || '',
     company: text(app, 'Company'), manager: text(app, 'Manager'), template: text(app, 'Template') };
 }
+/** The document properties of an open package, including properties changed in File > Properties since it was opened. */
+export const packageDocumentProperties = pkg => documentProperties(pkg?.parts || {}, pkg?.coreProperties);
 
 /**
  * The fields the Field dialog offers: name, category, a short description in this app's words, the
@@ -163,11 +171,22 @@ export function evaluateField(instruction, context = {}) {
       value = properties[key] || ''; break;
     }
     case 'NUMPAGES': if (!Number.isInteger(context.pages)) return null; value = String(context.pages); break;
+    case 'PAGE': {
+      // `page` is the page's number and `pageFormat` its section's number format. A number format switch
+      // (\* roman) formats the number itself, overriding the section's format (§17.16.4.3).
+      if (!Number.isInteger(context.page) || context.page < 0) return null;
+      const switched = formats.some(f => /^(arabic|arabicdash|roman|alphabetic)$/i.test(f));
+      try { value = switched ? String(context.page) : formatPageNumber(context.page, context.pageFormat || 'decimal'); } catch { value = String(context.page); }
+      break;
+    }
     case 'NUMWORDS': if (context.text === undefined) return null; value = String(words(context.text)); break;
     case 'NUMCHARS': if (context.text === undefined) return null; value = String([...String(context.text).replace(/[\s\ufffc]/gu, '')].length); break;
     default: return null;
   }
-  for (const format of formats) if (!/^mergeformat$/i.test(format) && !/^charformat$/i.test(format)) value = applyGeneralFormat(value, format);
+  for (const format of formats) {
+    if (/^mergeformat$/i.test(format) || /^charformat$/i.test(format)) continue;
+    value = name === 'PAGE' && /^arabic$/i.test(format) ? String(context.page) : name === 'PAGE' && /^arabicdash$/i.test(format) ? `- ${context.page} -` : applyGeneralFormat(value, format);
+  }
   return value;
 }
 
@@ -211,10 +230,59 @@ export function fieldResultPlan(model, context = fieldEvaluationContext()) {
   const changes = [], text = model.text, ranges = bodyFieldRanges(model.paragraphs);
   for (const range of ranges) {
     if (range.parentId || ranges.some(r => r.parentId === range.field.id)) continue;
-    if (range.field.locked || range.field.type === 'SEQ' || range.field.type === 'REF') continue;
+    // A body PAGE field keeps the number it was given: the context's page is the caret's, not the field's.
+    if (range.field.locked || ['SEQ', 'REF', 'PAGE'].includes(range.field.type)) continue;
     if (!context && !['DATE', 'TIME'].includes(range.field.type)) continue;
     const value = evaluateField(range.field.instruction, { ...(context || {}), text });
     if (value !== null && text.slice(range.start, range.end) !== value) changes.push({ range, text: value });
   }
   return changes;
 }
+
+const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+// Results that follow pagination (headers and footers draw them live) or that this evaluator does not compute.
+const LIVE_STORY_FIELDS = new Set(['PAGE', 'NUMPAGES', 'SECTIONPAGES']);
+
+/**
+ * Update Fields in a header or footer (its story model): fields this evaluator computes (DATE, FILENAME,
+ * AUTHOR, NUMWORDS…) get their current result. A story field is one atomic run holding the field's saved
+ * envelope, so the new result is written into that envelope, with the old result's run formatting, as the
+ * saved file will hold it. Locked fields, page numbers and fields it cannot evaluate are left alone.
+ * One undo step; returns the number of fields changed.
+ */
+export function updateStoryFields(model, context = fieldEvaluationContext()) {
+  const changes = [];
+  for (const [pi, p] of model.paragraphs.entries()) for (const [ri, run] of p.runs.entries()) {
+    const field = run.field;
+    if (!field || field.locked || LIVE_STORY_FIELDS.has(field.type)) continue;
+    const value = evaluateField(field.instruction, { ...(context || {}), text: context?.text ?? '' });
+    if (value === null || value === field.cachedText) continue;
+    let source;
+    try {
+      const doc = new DOMParser().parseFromString(`<w:p xmlns:w="${W}"/>`, 'application/xml');
+      const envelope = new DOMParser().parseFromString(`<w:p xmlns:w="${W}">${field.source}</w:p>`, 'application/xml').documentElement;
+      const [segment] = pageFieldSegments(envelope);
+      const old = segment?.resultNodes?.find(n => n.namespaceURI === W && n.localName === 'r');
+      const result = doc.createElementNS(W, 'w:r');
+      const properties = old && [...old.children].find(n => n.namespaceURI === W && n.localName === 'rPr');
+      if (properties) result.append(doc.importNode(properties, true));
+      const lines = String(value).split(/\r\n?|\n|\v/);
+      lines.forEach((line, i) => {
+        if (i) result.append(doc.createElementNS(W, 'w:br'));
+        if (!line) return;
+        const t = doc.createElementNS(W, 'w:t'); t.setAttribute('xml:space', 'preserve'); t.textContent = line; result.append(t);
+      });
+      source = writePageFieldResult(field, value ? [result] : [], doc).map(serializeFragment).join('');
+    } catch { continue; } // An envelope this writer cannot rewrite keeps its saved result.
+    changes.push({ pi, ri, field: { ...field, source, cachedText: value } });
+  }
+  if (!changes.length) return 0;
+  model.checkpoint();
+  for (const { pi, ri, field } of changes) {
+    const p = model.paragraphs[pi];
+    model.paragraphs[pi] = { ...p, runs: p.runs.map((run, i) => i === ri ? { ...run, field } : run) };
+  }
+  model.didChange();
+  return changes.length;
+}
+

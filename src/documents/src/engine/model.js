@@ -332,7 +332,7 @@ function normalize(runs) {
   for (const run of runs) {
     if (!run.text && !run.contentControl) continue;
     const last = result.at(-1);
-    if (last && !last.image && !run.image && !last.math && !run.math && !last.field && !run.field && !last.noteMark && !run.noteMark && !last.bodySymbol && !run.bodySymbol && !last.noBreakHyphen && !run.noBreakHyphen && !last.breakClear && !run.breakClear && JSON.stringify({ ...last, text: '' }) === JSON.stringify({ ...run, text: '' })) last.text += run.text;
+    if (last && !last.image && !run.image && !last.math && !run.math && !last.field && !run.field && !last.noteMark && !run.noteMark && !last.bodySymbol && !run.bodySymbol && !last.vml && !run.vml && !last.noBreakHyphen && !run.noBreakHyphen && !last.breakClear && !run.breakClear && JSON.stringify({ ...last, text: '' }) === JSON.stringify({ ...run, text: '' })) last.text += run.text;
     else result.push({ ...run });
   }
   return result;
@@ -467,8 +467,10 @@ export class TextDocument {
    * `[start, end]` is another range to read instead of the selection.
    */
   clipboardText(noteText = () => '', [start, end] = this.range) {
-    let at = 0, text = '';
-    for (const p of this.paragraphs) {
+    let at = 0, text = '', rows = null;
+    // Cells of one row are separated by a tab and rows by a line, as a copied table reads in other applications.
+    const rowOf = id => { if (!rows) { rows = new Map(); for (const table of this.tables) for (const row of table.rows) for (const cell of row.cells) rows.set(cell.id, row); } return rows.get(id); };
+    for (const [index, p] of this.paragraphs.entries()) {
       for (const run of p.runs) {
         const length = run.text.length;
         if (run.image) { if (at >= start && at < end) text += run.image.alt || '[Image]'; }
@@ -477,7 +479,10 @@ export class TextDocument {
         else text += run.text.slice(Math.max(0, start - at), Math.max(0, end - at));
         at += length;
       }
-      if (at >= start && at < end) text += '\n';
+      if (at >= start && at < end) {
+        const next = this.paragraphs[index + 1];
+        text += p.cellId && next?.cellId && next.cellId !== p.cellId && rowOf(p.cellId) && rowOf(p.cellId) === rowOf(next.cellId) ? '\t' : '\n';
+      }
       at++;
     }
     return text.replace(/\u000e/g, '\n');
@@ -568,7 +573,7 @@ export class TextDocument {
       } else if (Object.hasOwn(PAGINATION_DEFAULTS, key) || Object.hasOwn(PARAGRAPH_FLAGS, key) || key === 'contextualSpacing') {
         if (typeof value !== 'boolean') throw new Error('Paragraph pagination must be on or off.');
       } else if (key === 'alignment') {
-        if (!['left', 'center', 'right', 'both'].includes(value)) throw new Error('Choose left, center, right or justified alignment.');
+        if (!['left', 'center', 'right', 'both', 'distribute'].includes(value)) throw new Error('Choose left, center, right, justified or distributed alignment.');
       } else if (key === 'lineRule') {
         if (!['auto', 'exact', 'atLeast'].includes(value)) throw new Error('Unsupported line spacing rule.');
       } else if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 600) {
@@ -886,6 +891,8 @@ export class TextDocument {
     const last = this.paragraphs.findLastIndex(p => p.cellId === lastCell.id);
     this.select(this.paragraphOffset(index), this.paragraphOffset(last) + paragraphLength(this.paragraphs[last]));
     this.cellBlock = { tableId: table.id, top: normalized.top, bottom: normalized.bottom, left: normalized.left, right: normalized.right };
+    // Select Row / Select Column: the rows or columns chosen, inside a block grown by merged cells.
+    for (const key of ['rows', 'columns']) if (Array.isArray(block[key])) this.cellBlock[key] = [...block[key]];
     return true;
   }
   /**
@@ -1057,6 +1064,7 @@ export class TextDocument {
     return null;
   }
   mergeCells() {
+    if (this.trackChanges && !this.trackingInternal) throw new Error('Merging cells cannot be tracked yet. Turn off Track Changes to do this.');
     const context = this.mergeCellsContext;
     if (!context) throw new Error('Select text in two or more adjacent cells within one row.');
     const { table, row, cell, column, index, cells } = context, ids = new Set(cells.map(c => c.id));
@@ -1084,6 +1092,7 @@ export class TextDocument {
     return { ...context, owner, below: owners.get(entry.cell.id) };
   }
   mergeCellBelow() {
+    if (this.trackChanges && !this.trackingInternal) throw new Error('Merging cells cannot be tracked yet. Turn off Track Changes to do this.');
     const context = this.mergeBelowContext;
     if (!context) throw new Error('The cell below must cover the same grid columns and row alignment. Align the table or split other merged cells first.');
     const { table, owner, below } = context, state = tableContent(this, table);
@@ -1302,6 +1311,7 @@ export class TextDocument {
   }
   deleteTablePart(kind = 'table') {
     const context = this.tableContext; if (!context) return false;
+    if (this.trackChanges && !this.trackingInternal) throw new Error(`Deleting ${kind === 'table' ? 'a table' : `a table ${kind}`} cannot be tracked yet. Turn off Track Changes to do this.`);
     if (!['table', 'row', 'column'].includes(kind)) throw new Error('Choose a table, row or column.');
     const { table, row, rowIndex, column, end, span } = context;
     if (kind === 'column' && table.rows.some(row => row.gridBefore || row.gridAfter)) throw new Error('Column deletion in tables with omitted grid cells is not supported yet.');
@@ -1492,7 +1502,7 @@ export class TextDocument {
   typingRun(position = this.selection.focus, affinity) {
     affinity ??= position === this.selection.focus && this.selection.controlCaret?.side === 'after' ? 'forward' : 'backward';
     const source = this.formatAt(position, affinity), run = this.typingDirectCleared ? clearedRun(source) : source;
-    delete run.image; delete run.contentControl; delete run.positionalTab; delete run.noteMark; delete run.bodySymbol; delete run.noBreakHyphen; delete run.breakClear; delete run.field; delete run.revision; delete run.math;
+    delete run.image; delete run.contentControl; delete run.positionalTab; delete run.noteMark; delete run.bodySymbol; delete run.noBreakHyphen; delete run.breakClear; delete run.field; delete run.revision; delete run.math; delete run.vml;
     // Boundary typing is plain text; strictly interior edits extend the link.
     const link = hyperlinkAt(this.paragraphs, position);
     if (!link || position <= link.start || position >= link.end) {
@@ -1613,7 +1623,9 @@ export class TextDocument {
     this.didChange(); return true;
   }
   deleteAllComments({ resolvedOnly = false } = {}) {
-    const ids = (this.comments || []).filter(c => !resolvedOnly || c.done).map(c => c.id);
+    const comments = this.comments || [];
+    // A thread is resolved when its first comment is (Word marks only that one done): its replies go with it.
+    const ids = !resolvedOnly ? comments.map(c => c.id) : [...new Set(comments.filter(c => c.done && (!c.parentId || !comments.some(p => p.id === c.parentId))).flatMap(c => commentThread(comments, c.id)))];
     if (!ids.length) return false;
     this.checkpoint();
     removeCommentMarkers(this.paragraphs, ids);
@@ -2352,8 +2364,18 @@ export class TextDocument {
     this.formatRejectSkipped = false;
     // Resolving changes is not itself a tracked formatting change.
     this.formatTrackingSuppressed = true;
-    const changes = () => (start === end ? this.revisionsAt(start, end) : revisionRanges(this.paragraphs).filter(r => r.start < end && r.end > start)).filter(r => only(r))
-      .map(r => ({ ...r, start: start === end ? r.start : Math.max(start, r.start), end: start === end ? r.end : Math.min(end, r.end) }));
+    const changes = () => {
+      const list = (start === end ? this.revisionsAt(start, end) : revisionRanges(this.paragraphs).filter(r => r.start < end && r.end > start)).filter(r => only(r))
+        .map(r => ({ ...r, start: start === end ? r.start : Math.max(start, r.start), end: start === end ? r.end : Math.min(end, r.end) }));
+      // A move is one named change (§17.13.5.23, .24 moveFromRangeStart/moveToRangeStart): resolving either half
+      // resolves all of both, wherever the other half is. Accepting only the half moved to left the text it was
+      // moved from deleted but pending.
+      const names = new Set(list.filter(r => r.move && r.moveName).map(r => r.moveName));
+      if (!names.size) return list;
+      const moved = r => r.move && names.has(r.moveName);
+      const whole = revisionRanges(this.paragraphs).filter(moved).map(r => ({ ...r, partner: !list.some(t => moved(t) && t.moveName === r.moveName && t.type === r.type) }));
+      return [...list.filter(r => !moved(r)), ...whole].sort((x, y) => x.start - y.start);
+    };
     let targets = changes();
     // A field inserted or deleted as a whole is resolved with the change its result is part of, or, resolving a
     // stretch of the document, whenever it lies inside it (an index entry or empty result has no text of its own).
@@ -2389,7 +2411,7 @@ export class TextDocument {
       if (restored.size) { for (const p of restored) p.runs = normalize(p.runs); targets = changes(); }
     }
     this.trackingInternal = true;
-    const caret = targets[0]?.start ?? fieldTargets[0].start;
+    const caret = (targets.find(r => !r.partner) || targets[0])?.start ?? fieldTargets[0].start;
     try {
       // Changes that keep their text (formatting, and the side of a change being kept) first, while every
       // range still holds; then the removals, from the last, so each earlier range stays where it was.

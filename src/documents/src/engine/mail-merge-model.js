@@ -84,13 +84,13 @@ function runAt(paragraphs, position) {
   return null;
 }
 // What a result run's formatting is made of: everything but its text and the objects and annotations it holds.
-const NOT_FORMATTING = ['text', 'image', 'contentControl', 'positionalTab', 'noteMark', 'bodySymbol', 'noBreakHyphen', 'breakClear', 'field', 'revision', 'formatRevision', 'math', 'link'];
+const NOT_FORMATTING = ['text', 'image', 'contentControl', 'positionalTab', 'noteMark', 'bodySymbol', 'noBreakHyphen', 'breakClear', 'field', 'revision', 'formatRevision', 'math', 'vml', 'link'];
 const resultFormatting = run => { const out = structuredClone(run); for (const key of NOT_FORMATTING) delete out[key]; return out; };
 
 /** Runs with the plain text in [from, to) given `formatting`; text a line break or object holds keeps its own. */
 function withFormatting(runs, from, to, formatting) {
   const out = []; let at = 0;
-  const plain = run => !run.image && !run.math && !run.field && !run.noteMark && !run.bodySymbol && !run.noBreakHyphen && !run.breakClear && !run.contentControl;
+  const plain = run => !run.image && !run.math && !run.vml && !run.field && !run.noteMark && !run.bodySymbol && !run.noBreakHyphen && !run.breakClear && !run.contentControl;
   const push = run => {
     const last = out.at(-1);
     if (last && plain(last) && plain(run) && JSON.stringify({ ...last, text: '' }) === JSON.stringify({ ...run, text: '' })) last.text += run.text;
@@ -117,10 +117,14 @@ export function applyMergeResults(model, fields, results) {
     if (text.slice(f.range.start, f.range.end) !== shown) changes.push({ range: f.range, text: shown });
   });
   if (!changes.length) return 0;
-  const tracking = model.trackChanges, selection = { ...model.selection };
+  const tracking = model.trackChanges;
+  // The selection stays on its text: a longer or shorter result before it moves it along.
+  let { anchor, focus } = model.selection;
   model.trackChanges = false;
   try {
     for (const { range, text: value } of changes.reverse()) {
+      const map = at => at <= range.start ? at : at >= range.end ? at + value.length - (range.end - range.start) : range.start + Math.min(at - range.start, value.length);
+      anchor = map(anchor); focus = map(focus);
       model.select(range.start, range.end);
       model.typingFormat = {}; model.typingStyle = null; model.typingDirectCleared = false;
       if (range.start === range.end && !value) continue;
@@ -136,7 +140,7 @@ export function applyMergeResults(model, fields, results) {
     }
   } finally { model.trackChanges = tracking; }
   const max = model.text.length;
-  model.select(Math.min(selection.anchor, max), Math.min(selection.focus, max));
+  model.select(Math.min(anchor, max), Math.min(focus, max));
   model.didChange();
   return changes.length;
 }
@@ -206,7 +210,7 @@ export function updateLabels(model) {
     const replacement = source.map(p => copyParagraph(p, cell.id));
     model.paragraphs.splice(at, end - at, ...replacement);
     const head = replacement[0];
-    const template = head.runs.find(r => !r.field && !r.image && !r.noteMark && !r.math && !r.bodySymbol) || paragraph('x').runs[0];
+    const template = head.runs.find(r => !r.field && !r.image && !r.noteMark && !r.math && !r.vml && !r.bodySymbol) || paragraph('x').runs[0];
     const lead = { ...structuredClone(template), text };
     for (const key of ['link', 'revision', 'contentControl', 'styleChanged']) delete lead[key];
     head.runs = [lead, ...head.runs];

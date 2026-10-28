@@ -35,6 +35,7 @@ export function proofingText(text, paragraphs) {
  * The words spelling checks: [{ start, end, word, wordStart?, wordEnd? }]. Hyphenated compounds are checked part by part;
  * apostrophes inside a word stay part of it and typographic ones are normalized.
  */
+const INVISIBLE = /[\u00ad\u200b-\u200d\u2060\ufeff]/;
 export function wordsToCheck(text) {
   const words = [];
   const segmenter = new Intl.Segmenter('en', { granularity: 'word' });
@@ -49,7 +50,16 @@ export function wordsToCheck(text) {
     const after = text.slice(end).search(/[\s]/);
     const token = text.slice(before, after < 0 ? text.length : end + after).replace(/[\s\u000b\f\n]+/g, '');
     if (ADDRESS.test(token.replace(/[.,;:!?)"'’”]+$/, ''))) continue;
-    const word = segment.segment.replace(/’/g, "'");
+    // Optional hyphens (manual hyphenation) and zero-width joiners and spaces are not letters: the word is checked
+    // without them. `source[i]` is where the checked word's character i is in the segment.
+    const source = [];
+    let word = '';
+    for (let i = 0; i < segment.segment.length; i++) {
+      const c = segment.segment[i];
+      if (INVISIBLE.test(c)) continue;
+      word += c === '’' ? "'" : c; source.push(i);
+    }
+    if (!word) continue;
     if (/\d/.test(word) || /_/.test(word)) continue;
     if (word.length > 1 && word === word.toUpperCase() && /\p{Lu}/u.test(word)) continue;
     // The only dictionary is English: a word with no Latin letter (Thai, Cyrillic, Han...) is not checked.
@@ -58,8 +68,8 @@ export function wordsToCheck(text) {
     // than the segment, wordStart and wordEnd say where it is, so a correction keeps the "'s" and apostrophes.
     const trimmed = word.replace(/'s$/i, '').replace(/^'+|'+$/g, '');
     if (!trimmed || trimmed === word) { words.push({ start, end, word: trimmed || word }); continue; }
-    const wordStart = start + word.match(/^'*/)[0].length;
-    words.push({ start, end, word: trimmed, wordStart, wordEnd: wordStart + trimmed.length });
+    const lead = word.match(/^'*/)[0].length;
+    words.push({ start, end, word: trimmed, wordStart: start + source[lead], wordEnd: start + source[lead + trimmed.length - 1] + 1 });
   }
   return words;
 }
@@ -92,6 +102,7 @@ export function rankSuggestions(word, suggestions, limit = 6) {
     if (candidate.length !== lower.length) score += 2;
     if (candidate[0] !== lower[0]) score += 3;
     if (s !== candidate && word === lower) score += 4; // a proper noun for a lowercase word
+    if (!lower.includes("'") && candidate.replaceAll("'", '') === lower) score -= 12; // a left-out apostrophe: dont, wasnt
     return { s, score, index };
   }).sort((a, b) => a.score - b.score || a.index - b.index);
   const out = [];
@@ -112,6 +123,22 @@ export function addPersonalWord(word) {
   if (!list.includes(word)) { list.push(word); try { localStorage.setItem(PERSONAL_KEY, JSON.stringify(list.slice(-5000))); } catch { /* storage full or blocked */ } }
 }
 
+/**
+ * The words a left-out apostrophe makes of `word` (dont → don't, youre → you're, im → I'm), which the
+ * dictionary's own suggestions often miss although it is the commonest slip in a contraction.
+ */
+export function apostropheSuggestions(word, correct) {
+  if (word.includes("'") || word.length < 2 || word.length > 24) return [];
+  const out = [];
+  for (let at = 1; at < word.length; at++) {
+    const candidate = word.slice(0, at) + "'" + word.slice(at);
+    if (correct(candidate)) out.push(candidate);
+    // The pronoun I is always a capital: im → I'm, ive → I've, id → I'd, ill → I'll.
+    else if (at === 1 && word[0] === 'i' && correct('I' + candidate.slice(1))) out.push('I' + candidate.slice(1));
+  }
+  return out;
+}
+
 let speller = null;
 /** Load the dictionary once: { correct(word), suggest(word), add(word) }. */
 export function loadSpeller(base = document.baseURI) {
@@ -125,7 +152,7 @@ export function loadSpeller(base = document.baseURI) {
     for (const word of personalWords()) engine.add(word);
     return {
       correct: word => engine.correct(word) || engine.correct(word.toLowerCase()) && word[0] === word[0].toUpperCase() && word.slice(1) === word.slice(1).toLowerCase(),
-      suggest: word => rankSuggestions(word, engine.suggest(word)),
+      suggest: word => rankSuggestions(word, [...apostropheSuggestions(word, candidate => engine.correct(candidate)), ...engine.suggest(word)]),
       add: word => { engine.add(word); addPersonalWord(word); },
     };
   })().catch(error => { speller = null; throw error; });

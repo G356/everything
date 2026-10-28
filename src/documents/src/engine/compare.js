@@ -9,6 +9,7 @@
 // Combine: base = original document, other = a revised copy (other-only text is inserted text).
 import { trackFormatChanges } from './revisions.js';
 import { documentBlocks } from './tables.js';
+import { readCoreProperties } from './docx-core-properties.js';
 
 const OBJECT = '￼';
 
@@ -102,7 +103,7 @@ export function diffSequences(a, b, equals = (x, y) => x === y, { maxEdits = 400
 const visible = run => run.revision?.type !== 'del';
 /** The paragraph's text with tracked deletions left out. */
 export const finalText = p => p.runs.filter(visible).map(r => r.text).join('');
-const special = r => r.image || r.math || r.field || r.noteMark || r.bodySymbol || r.noBreakHyphen || r.breakClear || r.contentControl;
+const special = r => r.image || r.math || r.vml || r.field || r.noteMark || r.bodySymbol || r.noBreakHyphen || r.breakClear || r.contentControl;
 const fullLength = p => p.runs.reduce((n, r) => n + r.text.length, 0);
 /** Similarity of two texts: the Dice coefficient of their character bigrams (case-insensitive). */
 export function similarity(x, y) {
@@ -120,7 +121,7 @@ export function similarity(x, y) {
 function sanitizedRun(run, styleIds) {
   if (special(run) && run.text === OBJECT) return null;
   const out = { ...structuredClone(run) };
-  for (const key of ['link', 'contentControl', 'formatRevision', 'revision', 'image', 'math', 'field', 'noteMark', 'bodySymbol', 'tocHyperlink']) delete out[key];
+  for (const key of ['link', 'contentControl', 'formatRevision', 'revision', 'image', 'math', 'vml', 'field', 'noteMark', 'bodySymbol', 'tocHyperlink']) delete out[key];
   if (out.styleId && !styleIds.has(out.styleId)) {
     out.styleId = null;
     if (out.properties) out.properties = out.properties.replace(/<(?:\w+:)?rStyle\b[^>]*\/>/g, '');
@@ -419,17 +420,11 @@ export function mergeDocuments(base, other, { mode = 'compare', author = 'Author
   return { paragraphs: out, tables: base.tables, stats };
 }
 
-/** The last author recorded in a package's core properties (cp:lastModifiedBy, then dc:creator). */
+/**
+ * The last author recorded in a package's core properties (cp:lastModifiedBy, then dc:creator), read from
+ * the part the package relationship names (ECMA-376 Part 2 §11).
+ */
 export function documentAuthor(parts) {
-  const core = parts?.['docProps/core.xml'];
-  if (!core) return null;
-  try {
-    const text = typeof core === 'string' ? core : new TextDecoder().decode(core);
-    const doc = new DOMParser().parseFromString(text, 'application/xml');
-    for (const name of ['lastModifiedBy', 'creator']) {
-      const node = [...doc.getElementsByTagName('*')].find(n => n.localName === name);
-      if (node?.textContent.trim()) return node.textContent.trim();
-    }
-  } catch { /* unreadable core properties */ }
-  return null;
+  const core = readCoreProperties(parts || {});
+  return core.lastModifiedBy || core.creator || null;
 }

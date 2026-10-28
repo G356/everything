@@ -206,10 +206,30 @@ test('the Width spinner shows and sets the width of each selected column', async
   await expect(width).toHaveValue(String(Number((before[0] / 1440).toFixed(2))));
   await width.fill('1.5'); await width.press('Enter');
   await expect.poll(grid).toEqual([2160, 2160, before[2]]);
+  // One Undo takes it back (the box applying its value again as it loses focus is no second step).
+  await page.getByRole('button', { name: 'Undo', exact: true }).first().click();
+  await expect.poll(grid).toEqual(before);
+  await page.getByRole('button', { name: 'Redo', exact: true }).first().click();
+  await expect.poll(grid).toEqual([2160, 2160, before[2]]);
   // A merged cell shows the width it covers.
   await page.evaluate(() => { const e = window.__docs.current.view.engine, m = e.model, t = m.tables[0]; m.setCellBlock({ tableId: t.id, top: 0, bottom: 0, left: 0, right: 2 }); });
   await (await onTab(page, 'tableLayout')).getByRole('button', { name: 'Merge Cells', exact: true }).click();
   await expect(width).toHaveValue('3');
+});
+
+test('the Width spinner sets a column of a table fitted to the window to that width', async ({ page }) => {
+  await newTable(page, 3, 2, ['a', 'b', 'c']);
+  await goToCell(page, 0, 0);
+  await onTab(page, 'tableLayout');
+  await ribbon(page).getByRole('button', { name: 'AutoFit', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'AutoFit Window' }).click();
+  await expect.poll(() => page.evaluate(() => window.__docs.current.view.engine.model.tables[0].width.type)).toBe('pct');
+  const width = page.getByRole('spinbutton', { name: 'Width (in)' });
+  await width.fill('1'); await width.press('Enter');
+  // The column is laid out 1 in wide (the table is no longer stretched to the window to fill it out again).
+  const laidOut = () => page.evaluate(() => { const e = window.__docs.current.view.engine; return e.layout.tableWidths[e.model.tables[0].id].map(w => Math.round(w * 15)); });
+  await expect.poll(async () => (await laidOut())[0]).toBe(1440);
+  await expect(width).toHaveValue('1');
 });
 
 test('the Table menu and context menu offer the table commands', async ({ page }) => {

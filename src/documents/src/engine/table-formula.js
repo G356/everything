@@ -17,11 +17,12 @@ export const NUMBER_FORMATS = Object.freeze(['0', '0.00', '#,##0', '#,##0.00', '
 /** The leading number of a cell's text: currency, grouping, percent and accounting negatives allowed. */
 export function cellNumber(text) {
   // The number must lead the cell's text: "12 boxes" counts, "Q1" does not.
-  const match = /^\s*()([-+−]?)\s*\(?\s*[$€£¥]?\s*(\d[\d,]*(?:\.\d+)?|\.\d+)/.exec(text);
+  // Parentheses make it negative (accounting style) only when they enclose that leading number: "(30)", not "100 (20)".
+  const match = /^\s*()([-+−]?)\s*(\(?)\s*[$€£¥]?\s*(\d[\d,]*(?:\.\d+)?|\.\d+)\s*(\)?)/.exec(text);
   if (!match) return null;
-  const value = Number(match[3].replace(/,/g, ''));
+  const value = Number(match[4].replace(/,/g, ''));
   if (!Number.isFinite(value)) return null;
-  const negative = match[2] === '-' || match[2] === '−' || /\(\s*[$€£¥]?\s*[\d.,]+\s*\)/.test(text);
+  const negative = match[2] === '-' || match[2] === '−' || !!match[3] && !!match[5];
   return negative ? -value : value;
 }
 
@@ -105,9 +106,20 @@ export const columnName = column => { let name = ''; for (let n = column + 1; n 
 
 /* ---- Evaluation ---- */
 
-/** The text a cell shows (its own paragraphs, not nested tables'). */
+// Move the decimal point by `places` in the number's own decimal digits, so 1.005 shifts to 100.5, not 100.49999999999999.
+const shiftDecimal = (value, places) => { const [mantissa, exponent = '0'] = String(value).split('e'); return Number(`${mantissa}e${Number(exponent) + places}`); };
+/** ROUND: to `places` decimals (tens, hundreds… when negative), halves away from zero. */
+function roundAway(value, places) {
+  if (!Number.isFinite(value)) return value;
+  const rounded = shiftDecimal(Math.round(shiftDecimal(Math.abs(value), places)), -places);
+  return value < 0 && rounded ? -rounded : rounded;
+}
+
+/** A paragraph's text with its tracked deletions left out, as it reads once changes are accepted. */
+export const keptText = p => p.runs.some(run => run.revision?.type === 'del') ? p.runs.filter(run => run.revision?.type !== 'del').map(run => run.text).join('') : paragraphText(p);
+/** The text a cell shows (its own paragraphs, not nested tables'), without tracked deletions. */
 function cellText(paragraphs, cell) {
-  return paragraphs.filter(p => p.cellId === cell.id).map(paragraphText).join(' ').replace(/\ufffc/g, '');
+  return paragraphs.filter(p => p.cellId === cell.id).map(keptText).join(' ').replace(/\ufffc/g, '');
 }
 function cellAt(table, row, column) {
   const r = table.rows[row];
@@ -198,7 +210,7 @@ function evaluate(node, context) {
         case 'SIGN': need(1); return Math.sign(value(0));
         case 'NOT': need(1); return +!value(0);
         case 'MOD': { need(2); const b = value(1); if (b === 0) throw new Error('!Zero Divide'); return value(0) % b; }
-        case 'ROUND': { need(2); const f = 10 ** Math.trunc(value(1)); return Math.round(value(0) * f) / f; }
+        case 'ROUND': { need(2); return roundAway(value(0), Math.trunc(value(1))); }
         case 'AND': need(2); return +(!!value(0) && !!value(1));
         case 'OR': need(2); return +(!!value(0) || !!value(1));
         case 'IF': need(3); return value(0) ? value(1) : value(2);

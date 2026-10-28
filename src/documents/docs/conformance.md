@@ -1483,15 +1483,24 @@ and the clauses above, including the
 [soft-return definition](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.donotexpandshiftreturn?view=openxml-3.0.1).
 The review distinguishes word justification from `distribute`, which also expands
 characters, and requires Arabic kashida behavior that this engine does not yet
-implement. Arabic text in a justified paragraph therefore rejects on import or
-rolls back an editing transaction.
+implement. Arabic text in a justified paragraph is justified by its word spaces,
+exactly as Latin text: it imports editable and typing Arabic into a justified
+paragraph is accepted. This is a declared approximation: the reference
+application can lengthen Arabic joins with kashida (tatweel, U+0640) instead
+of, or as well as, widening spaces, so justified Arabic lines reach the same
+margins with different inter-word gaps and no elongated joins. No kashida
+characters enter the source text (`tests/canvas-justification.test.js`,
+`tests/browser/justification.spec.js`).
 
 Declared preview policy: expansion opportunities are interior U+0020 spaces and
 U+00A0 nonbreaking spaces. Leading/trailing spaces and other fixed Unicode spaces,
 including narrow NBSP, retain natural advances. The existing trailing-space
 compatibility flags still govern wrapping, hanging and underlining. With tabs,
-only the final left-aligned field expands; earlier fields stay anchored. Actual
-expansion after center/right/decimal tabs rejects before a save handler attaches.
+only the final left-aligned field expands; earlier fields stay anchored. A line
+whose final field follows a center, right or decimal tab keeps its natural
+spacing, so that field stays aligned on its stop, and the document remains
+editable. This is a declared approximation: the reference application's rule
+for such lines was not measured.
 The local playground measures the incoming layout before replacing its current
 editor, so geometry-based import failures preserve the open document.
 Native advances are remeasured when rounding exceeds the writing edge, reducing
@@ -1521,8 +1530,19 @@ of fractional cell widths, text scaling, character spacing and small caps with
 superscript. Screenshots cover rich paragraphs, both soft-return policies and
 continued tables with repeated headers.
 
-**Remaining gaps:** distributed and Thai justification, Arabic kashida, expansion
-after center/right/decimal tabs, language-specific justification rules and exact
+Distributed alignment (`w:jc w:val="distribute"`, §17.18.44 "Distribute All
+Characters Equally") imports, edits and lays out: every line, the paragraph's
+last line and lines ending in manual breaks included, is spread between both
+margins by widening the gap after every character of the line equally (spaces
+included), as native Canvas letter spacing in measurement and painting. Leading
+and trailing spaces, tab fields before the last one and inline pictures keep
+their advances; a line of one character stays at the start edge. The Paragraph
+and style dialogs offer Distributed; the Justify toolbar button is not pressed
+for it. `tests/distributed-alignment.test.js` and
+`tests/browser/justification.spec.js` cover widths, carets, import and editing.
+
+**Remaining gaps:** Thai distribution (`thaiDistribute`), Arabic kashida (justified Arabic widens spaces only), expansion
+after center/right/decimal tabs (such lines stay natural), language-specific justification rules and exact
 reference spacing across compatibility versions. No reference application was available
 for visual comparison. Browser checks cover current Chromium; other browsers
 are capability checked but not visually certified. A schema pass is not full
@@ -1861,7 +1881,7 @@ and accessible fill dialog were visually inspected.
 | Feature | Specification basis | Supported subset and evidence |
 | --- | --- | --- |
 | Paired range markers | ECMA-376 Part 1 §§17.13.6.1 `bookmarkEnd`, 17.13.6.2 `bookmarkStart`, 17.18.10 `ST_DecimalNumber` | Preserve paired zero-width markers in main-story paragraphs, table-cell paragraphs and supported hyperlink wrappers. Support points, nested/overlapping ranges and ranges spanning paragraphs or tables. Match integer IDs by numeric value using arbitrary-precision integers, preserving their source spelling on export. Require one start followed by one end per ID. Reject unmatched, reversed, duplicate-ID or malformed markers before editable open. Marker offsets are separate from text and run formatting. |
-| Names and duplicates | §17.13.6.2 `name`, §22.9.2.13 `ST_String`; [MS-OI29500 §2.1.356](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/da8b8f59-2af1-49d9-8553-f0c1ff2fb18d) | Import and retain arbitrary XML-valid names, including hidden underscore names, Unicode, spaces and empty strings. Resolve duplicate names to the first start in document order, following ECMA's rule; preserve subsequent markers. The native reference instead uses the last duplicate, a documented interoperability difference. New/renamed names use a declared ASCII authoring subset: 1–40 letters/digits/underscores, first character a letter or underscore, unique exact name. This UI subset does not restrict existing names. |
+| Names and duplicates | §17.13.6.2 `name`, §22.9.2.13 `ST_String`; [MS-OI29500 §2.1.356](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/da8b8f59-2af1-49d9-8553-f0c1ff2fb18d) | Import and retain arbitrary XML-valid names, including hidden underscore names, Unicode, spaces and empty strings. Resolve duplicate names to the first start in document order, following ECMA's rule; preserve subsequent markers. The native reference instead uses the last duplicate, a documented interoperability difference. New/renamed names use a declared authoring subset: 1–40 UTF-16 units of letters and digits of any script (with their combining marks) or underscores, first character a letter or underscore, no spaces or punctuation, unique exact name; the Bookmarks dialog asks for a letter first, since underscore names are hidden bookmarks it does not list. This UI subset does not restrict existing names. |
 | Marker attributes and containers | §§17.13.6.1–2, 17.18.13 `ST_DisplacedByCustomXml` | Paired column hints outside tables are retained and ignored as specified. Within tables, collapsed markers in the same paragraph are accepted as point bookmarks with their column attributes preserved, matching the native reference. Validate this after pairing endpoints, not while reading the start alone. Noncollapsed column ranges use the active-column model below; incomplete or noninteger pairs remain guarded. Retain valid next/prev displacement hints; they have no effect because block custom-XML structures are not editable in this engine. Reject invalid hints, marker child content and unknown attributes. Body/cell/control block boundaries and direct table/row boundaries have the additional supported subsets below. |
 | Internal destinations | §17.16.22 `hyperlink`, `anchor`, `r:id` | With no `r:id`, an anchor names a bookmark in the current document. Preserve explicit empty strings separately from omitted anchors. A missing bookmark or omitted anchor leads to the document start. `r:id` retains precedence over an accompanying anchor. Creating/editing internal links writes `w:anchor` without adding an external relationship. Switching between destination types retains character formatting and wrapper attributes. Nonempty `docLocation` remains unsupported. |
 | Bookmark editing | Original editor policy over §§17.13.6.1–2 | Accessible Bookmarks controls add a point/range from the current selection, rename, remove or navigate. Rename updates internal links to the active named bookmark while leaving ignored anchors on external links unchanged. Removing a bookmark retains links, which then follow missing-target fallback (or the next duplicate). Undo/redo restores markers, names, references, source text and selections atomically. |
@@ -2105,7 +2125,7 @@ were visually inspected. No reference rendering comparison was performed.
 
 | Feature | Specification basis | Supported subset and evidence |
 | --- | --- | --- |
-| Single and double forms | ECMA-376 Part 1 §§17.3.2.37 `strike`, 17.3.2.9 `dstrike`; §17.17.4 common booleans | Read single/double on and explicit false separately. Missing declarations inherit; absence throughout means no strikethrough. Accept missing `val` as true and `0/1/false/true/off/on`. Reject duplicate elements, malformed booleans, nested content and unknown WordprocessingML attributes. Reject both elements in the same active property set, including explicit false combinations, rather than silently choose a conflicting declaration. |
+| Single and double forms | ECMA-376 Part 1 §§17.3.2.37 `strike`, 17.3.2.9 `dstrike`; §17.17.4 common booleans | Read single/double on and explicit false separately. Missing declarations inherit; absence throughout means no strikethrough. Accept missing `val` as true and `0/1/false/true/off/on`. Reject duplicate elements, malformed booleans, nested content and unknown WordprocessingML attributes. Both elements in one property set are accepted when at most one is on (both off, or one on and the other off) and resolve as a pair, each declaration independently (see "Paired strike declarations" below); both on in one property set is rejected rather than silently choosing a form. |
 | Style inheritance | §§17.7.2–17.7.3; existing MS-OI29500 style-toggle compatibility policy recorded below | Single is a toggle; double is not in the §17.7.3 toggle list. Use the nearest declaration of each form in a same-type `basedOn` chain. Paragraph/table single declarations reset, character single declarations toggle relative to the document default, and direct declarations are absolute. Double on remains on through a child style declaring on. An off declaration affects its own form. Support document defaults, unconditional table styles, paragraph/character styles, empty marks, direct runs and numbering labels. |
 | Cross-form precedence | Declared compatibility interpretation of the mutually exclusive appearance requirement | A positive declaration selects its form over the previously resolved form. Resolve nearest single/double declarations in their style-chain order, then continue through the hierarchy. This provides one visual form and supports direct switching over inherited formatting. ECMA does not explicitly prescribe competing forms across different property sets; this precedence is an inference, not verified reference behavior. |
 | Editing and serialization | §§17.3.1.29, 17.3.2.28, 17.9.24; Part 4 §A.2 ordered run properties | Accessible icon buttons select single/double or clear the active form; mixed selections and future typing are supported. Native `formatStrikeThrough` input uses the same mutation/history path. Shared-style controls preserve four distinct on/off declarations and Inherit. A direct clear writes the false declaration for the inherited form, or single false when no inherited form exists. Switching removes the opposing source element; no new property set contains both. Explicit source declarations and unused invalid styles remain untouched until changed/exposed. |
@@ -2523,7 +2543,7 @@ that waits for the old editor to detach before checking the reopened document.
 | Feature | Specification basis | Supported subset and evidence |
 | --- | --- | --- |
 | Direct highlighting | ECMA-376 Part 1 §17.3.2.15 `highlight`, §17.18.40 `ST_HighlightColor`, §A.1 `CT_Highlight` | All 16 named colors and explicit `none`, with the standard's sRGB values (including `darkBlue=00008B`, `darkGreen=006400`, `darkGray=A9A9A9`, `lightGray=D3D3D3`). The anchored Text highlight swatch palette applies to a selection, an empty paragraph mark or future typing. No highlight writes `none` and reveals the underlying background. Invalid/missing values, duplicate elements, nested content and unknown highlight attributes reject before editing. |
-| Implementation-note restrictions | [MS-OI29500 §2.1.79](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/e07a90e2-76b5-47dd-8bf4-668a806177c7), referring to [§2.1.245](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/9f0ca7a0-5e6a-487e-bb52-2b74d4bb614a), [§2.1.248](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/d0244b61-fd96-45f0-ac84-7380d2b6d663), [§2.1.260](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/0f36799f-599e-449b-8d9d-cd42c9c6e41f), [§2.1.291](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/ffb4a990-b46f-4e38-8db3-96fc13d0b0f6) | Unlike the base schema, the native reference disallows highlight in document defaults, named styles, conditional table styles and numbering-level run properties. The supported subset therefore authors direct highlighting only. Active default/style/level declarations reject; unused definitions remain preserved and cannot be applied. Style-edit APIs reject highlight patches. Existing direct highlighting survives supported paragraph/character style changes. |
+| Implementation-note restrictions | [MS-OI29500 §2.1.79](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/e07a90e2-76b5-47dd-8bf4-668a806177c7), referring to [§2.1.245](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/9f0ca7a0-5e6a-487e-bb52-2b74d4bb614a), [§2.1.248](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/d0244b61-fd96-45f0-ac84-7380d2b6d663), [§2.1.260](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/0f36799f-599e-449b-8d9d-cd42c9c6e41f), [§2.1.291](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/ffb4a990-b46f-4e38-8db3-96fc13d0b0f6) | Unlike the base schema, the native reference disallows highlight in document defaults, named styles, conditional table styles and numbering-level run properties. The supported subset therefore authors direct highlighting only. A declaration of `none`, which highlights nothing, is accepted and kept; other active default/style/level declarations reject; unused definitions remain preserved and cannot be applied. Style-edit APIs reject highlight patches. Existing direct highlighting survives supported paragraph/character style changes. |
 | Background precedence and shading | §17.3.2.32 run `shd`, §17.3.5 `CT_Shd`, §17.18.78 `ST_Shd`, §17.7.2 hierarchy | Highlight supersedes run shading. Import flat `clear` fill and `solid` foreground, including RGB, Automatic, mapped themes and HSL tint/shade. Shading declarations inherit atomically through defaults, table/paragraph/character styles and direct properties. The existing theme resolver handles `themeFill`, `themeFillTint` and `themeFillShade` independently of foreground attributes. `clear` Automatic exposes the page/cell background; `solid` Automatic chooses contrasting black/white. Patterned and `nil` run shading reject, including when a highlight would hide them. Paragraph shading is supported by the later flat paragraph-shading iteration above. |
 | Geometry and paint | Existing source-offset/layout contracts; §17.3.1.33 line spacing | Background rectangles use measured source advances and the run's font/image ascent and descent. Include spaces, aligned tab gaps and inline-image reserved slots; transparent image pixels reveal the highlight. Exact line spacing clips backgrounds with text. Color/highlight boundaries share shaped text and do not change advances, AutoFit demand, caret stops, selection, line breaks or pagination. Repeated header copies share source formatting. Empty marks and undisplayed breaks have no artificial background width. |
 | Foreground and selection | §17.3.2.6 automatic foreground; application selection policy | Automatic foreground/underlines respond to run shading and the underlying paragraph/cell/page fill, ignoring highlight overlays as confirmed by the independent page-background reference controls. Paint page/cell fills, run backgrounds, translucent selection, then text/images/underlines. Selection remains visible over highlighting without washing out automatic white text on a dark background. List-label backgrounds follow paragraph-mark formatting and supported level shading; no highlight is written into numbering definitions. |
@@ -2934,10 +2954,10 @@ see the updated subset and limits above.
 
 | Feature | Specification basis | Supported subset and evidence |
 | --- | --- | --- |
-| Header declarations | ECMA-376 Part 1 §17.4.49 `tblHeader`, §17.17.4 common boolean properties | Leading, contiguous marked rows repeat at the top of each later page occupied by the table. Empty/true flags enable repetition; explicit false disables it. Flags after the first unmarked row are ignored for layout and preserved in the package. A table consisting entirely of header rows renders once if it fits a page. |
+| Header declarations | ECMA-376 Part 1 §17.4.49 `tblHeader`, §17.17.4 common boolean properties | Leading, contiguous marked rows repeat at the top of each later page occupied by the table. Empty/true flags enable repetition; explicit false disables it. Flags after the first unmarked row are ignored for layout and preserved in the package. A table consisting entirely of header rows renders once; one taller than a page flows across pages as ordinary rows. |
 | Inheritance and serialization | §17.7.6.11 style `trPr`, §17.4.49 | Unconditional table-style row properties resolve through the based-on chain before direct row declarations. Direct false overrides inherited true. Unchanged declarations and style parts retain their source bytes; edited flags write explicit true/false without expanding repeated display copies into DOCX rows. |
 | Pagination | §17.4.49; §17.4.6 `cantSplit`, §17.4.80 `trHeight` | The header is measured once and reserves space on each occupied table page. Body cells keep their independent text flow, row keeps, minimum heights, margins and vertical merges. A first body row moved by its keep carries the first header with it. Fixed and AutoFit tables use the same repeated-header placement. Header-only tables remain one placement unit. |
-| Merged headers | §17.4.17 `gridSpan`, §17.4.84 `vMerge` | Horizontal and vertical merges wholly inside the header are supported. Authoring a header region extends it to include whole vertical merges. Imports or subsequent merges crossing the header/body boundary reject before save attachment, or roll back the edit. The complete header must fit a page and leave room for body text lines. These restrictions are application limits. |
+| Merged headers | §17.4.17 `gridSpan`, §17.4.84 `vMerge` | Horizontal and vertical merges wholly inside the header are supported. Authoring a header region extends it to include whole vertical merges. Imports or subsequent merges crossing the header/body boundary reject before save attachment, or roll back the edit (an application limit). A header too tall to leave a page room for the body, or for one of its text lines, is not repeated: its rows are laid out once as ordinary rows, as the reference application does, rather than refusing the table or the edit that grew it. |
 | Editing and navigation | Existing source-offset, history and geometry contracts | Repeat rows through selection sets a leading header region; remove repeated headers writes false where needed. Row insertion inside the region extends it; insertion at its boundary creates a body row, including under an inherited header style. Display copies share source positions. Clicking, typing and arrow movement retain the clicked page as a view preference; copy/paste, undo and exported text contain the header once. Selection highlights all visible copies. |
 
 Reviewed against official [ECMA-376 Part 1, fifth edition](https://ecma-international.org/publications-and-standards/standards/ecma-376/),
@@ -3523,7 +3543,7 @@ styles and geometry. Conformance validation now includes `word/numbering.xml`
 in every fixture and export. Puter mock save/reload also preserves list state.
 
 This is a body-paragraph subset, not complete numbering or reference equivalence.
-Picture bullets, linked numbering styles, custom/other numbering formats,
+Picture bullets, linked numbering styles, custom numbering formats and the other formats not listed under "Imported list number formats" below,
 non-geometry level paragraph properties and unsupported decorative symbol
 formatting reject when referenced. Unused definitions remain
 preserved. Alphabetic output currently uses English A–Z; locale-specific
@@ -3608,7 +3628,7 @@ new page-placement contracts.
 | Hanging-indent tab | Part 1 §17.3.1.38; Part 4 §14.8.3.31 `noTabHangInd` | A hanging indent supplies an implicit left tab at the paragraph's continuation edge, unless the retained compatibility flag disables it. An explicit stop at that position keeps its alignment. |
 | Alignment after tabs | Part 4 §14.8.3.21 `forgetLastTabAlignment` | Shape tab fields before aligning the whole line. With this retained flag enabled, omit the gap from the last non-left tab when computing the paragraph-alignment shift. |
 | Decimal fields | Part 1 §17.18.84; MS-OE376 §2.1.589 | Align around the first period, including across formatting runs. Without a period, use the end of the first number (before a suffix), or the field's end if there is no number. Other decimal separators/locales remain a stated gap. |
-| Character-unit overrides | MS-OI29500 §2.1.43 | Zero character-unit indents disable earlier character-unit indents in the native reference; retain those explicit zeros on edit. Effective nonzero character-unit indents are rejected instead of being approximated as physical distances. |
+| Character-unit overrides | MS-OI29500 §2.1.43 | Zero character-unit indents disable earlier character-unit indents in the native reference; retain those explicit zeros on edit. Effective nonzero character-unit indents are resolved as described in "Character-unit indents" below. |
 | Editing and geometry | Application behavior | Tab is one source character and one real layout gap. Carets, selection, hit testing, underline gaps and line metrics use its geometry. Aligned fields reshape as text grows; wrapping resumes at the continuation indent. Indents/custom tabs and the document default can change in one undo transaction. Unchanged mixed fields and exact imported twips survive the dialog. |
 
 Primary references:
@@ -3647,7 +3667,7 @@ are bounded by the indented right edge; an oversized aligned field cannot move
 backwards over its preceding field, and overflow wraps at word/grapheme boundaries.
 Exact reference behavior for overflowing/overlapping fields has not been verified.
 Tab leaders are supported by the later iteration above. Bar tabs, mirrored
-indents and effective nonzero character-unit indents are rejected. Locale-specific decimal separators are not implemented;
+indents are rejected; effective nonzero character-unit paragraph indents are resolved ("Character-unit indents" below), while character-unit indents on numbering levels are still rejected. Locale-specific decimal separators are not implemented;
 the dialog explicitly identifies period alignment. Other existing typography and
 pagination gaps below still apply.
 
@@ -7239,6 +7259,14 @@ Automatic linguistic hyphenation, soft-hyphen support and general multilingual
 line-breaking rules remain separate gaps. Forced grapheme wrapping of oversized
 unbreakable content retains its existing behavior.
 
+Em dashes (U+2014), en dashes (U+2013) and zero-width spaces (U+200B) also
+provide a wrapping opportunity after the character (UAX #14 classes B2, BA and
+ZW), in paragraph layout and AutoFit minimum widths alike, so "word—word" and
+paths with zero-width spaces wrap there instead of being split mid-word. A
+doubled dash stays together, and a dash keeps closing punctuation that follows
+it on its line. `tests/dash-line-breaking.test.js` covers these cases; no native
+reference rendering was recorded for them.
+
 ## Thai, Lao, Khmer and Myanmar word wrapping
 
 ECMA-376 Part 1 §17.3.3.31 (`t`) retains literal authored text and does not
@@ -7322,9 +7350,19 @@ recorded: line positions follow the browser's fonts, not a reference
 application's. Remaining gaps: `w:kinsoku w:val="0"`, `w:wordWrap`,
 `w:overflowPunct` (hanging punctuation), `w:topLinePunct`, custom
 `noLineBreaksAfter`/`noLineBreaksBefore` lists and `strictFirstAndLastChars` are
-not read; justified Chinese and Japanese lines stretch only their spaces, not
-the gaps between characters; word movement, word count and spelling still treat
-a run of ideographs as one word.
+not read; word movement, word count and spelling still treat a run of
+ideographs as one word.
+
+Justified (`w:jc w:val="both"`, §17.3.1.13, §17.18.44) Chinese and Japanese
+lines are filled to the margin: besides spaces, each gap where the line could
+have broken beside an ideograph or kana is widened by the same amount, as
+letter spacing on the character before it. Gaps the East Asian line rules close
+(before `。`, after `「`) and the end of the line are not widened; Latin words
+keep their letter spacing. Final lines and lines after center, right or decimal
+tabs keep their existing behavior. `tests/cjk-justification.test.js` covers the
+widths, carets and mixed lines. Remaining gaps: the reference application's
+exact distribution (compression of punctuation, `w:jc w:val="distribute"`) is
+not reproduced.
 
 ## Body editing with retained nonempty headers and footers
 
@@ -7446,6 +7484,36 @@ was re-exported and produced pixel-identical pages. Validation: 88 unit tests,
 16 browser tests (one optional corpus case skipped), 126 fixture/export XML
 schema checks, and production build/license checks pass. The corrected fixture
 also passed its six unit cases and browser case on rerun.
+
+### Update Fields in an edited header or footer
+
+Pressed while a header or footer is being edited, Update Fields (F9) also refreshes that
+story's fields that the field evaluator computes (DATE, TIME, FILENAME, AUTHOR,
+DOCPROPERTY, NUMWORDS… per §17.16.5). A story field stays one atomic run holding its
+saved envelope (§§17.16.18, 17.16.19): the new result replaces the cached result runs
+inside the original delimiters, keeping the first result run's properties, and saves as
+such. PAGE, NUMPAGES and SECTIONPAGES follow pagination as before; locked fields
+(`fldLock`), and fields the evaluator does not compute or whose envelope it cannot
+rewrite, keep their cached result. Only the open story is updated, in one undo step.
+
+### Editable page-number building blocks
+
+Word's Insert > Page Number designs save a header or footer whose paragraphs sit in
+one or two nested block-level `w:sdt` wrappers with `w:docPartObj`/`w:docPartGallery`
+"Page Numbers (Top of Page)" or "(Bottom of Page)" (§§17.5.2.29, 17.5.2.13). A story
+whose controls are all such block wrappers, with only `id`, `alias`, `tag`, `rPr` or an
+unlocked `lock` besides `docPartObj`, is now read through the body's block-control
+reader instead of being projected: it is editable, and saving writes each wrapper's
+original shell (properties and `sdtEndPr`) around its current paragraphs; an
+unedited story keeps its part byte for byte. Any other control in a header or
+footer (inline, locked, rich text, plain text…), and notes, keep the retained
+behavior above. If the control reader refuses a wrapper the story falls back to
+retained display. Word's "Watermarks" building block (a VML watermark beside a
+page-number block) is the same kind of wrapper; such wrappers' `w:id` values may repeat
+within a story or across copied header parts, since the id stays in the retained shell
+and identifies nothing else. The independently authored `page-number-parts.docx`
+(`tests/fixtures/page-number-parts`) covers Top of Page, Bottom of Page with
+`sdtEndPr`, and a nested "Page X of Y" footer with PAGE and NUMPAGES.
 
 ## Retained page-story tables
 
@@ -7881,7 +7949,9 @@ ECMA-376 Part 1 sections 17.16.4.3 and 17.16.4.3.1 define the `\\*` general
 formatting switch. PAGE, NUMPAGES and SECTIONPAGES now accept Arabic,
 ArabicDash, ROMAN, roman, ALPHABETIC and alphabetic, preserving the original
 instruction and cached-result XML. Case-sensitive Roman/alphabetic forms
-select the corresponding upper/lower output. General formats override section
+select the corresponding upper/lower output. Arabic and ArabicDash, which have
+no case to select, are read in any letter case (LibreOffice writes `PAGE \\*
+ARABIC`). General formats override section
 numbering; ArabicDash adds the specified spaced hyphens. The existing locked
 field behavior is retained.
 
@@ -8843,6 +8913,8 @@ as advancing to the next available column, or to the next page in the last
 column or a single-column section. The body text importer, paginator, editor,
 and exporter now retain this distinction from authored page and line breaks.
 Ctrl+Shift+Enter inserts a column break; plain-text copy substitutes a newline.
+In a table cell, where breaks do not advance, the keys split the table above the
+caret's row instead (from the first row: a paragraph before the table).
 The internal marker is serialized as a break element, never an XML control
 character. Untouched package parts remain unchanged.
 
@@ -12259,7 +12331,13 @@ direction override while retaining native Arabic joining. Colors, backgrounds
 and initial caret/selection geometry follow the relocated fragments; source
 UTF-16 offsets and graphemes stay unchanged. Supplementary characters use bidi
 class representatives only in the level-resolution proxy, not in painted or
-serialized text. An unmarked paragraph keeps its preceding layout path.
+serialized text. An unmarked paragraph keeps its preceding layout path, unless
+it contains a strong right-to-left letter (bidi class R or AL, such as Hebrew
+or Arabic typed into an ordinary run): such a paragraph is resolved by the same
+UAX #9 path with a left-to-right base level, so its carets, hit testing and
+selection follow the visual glyph order instead of mirroring it
+(`tests/unmarked-rtl-layout.test.js`). No run properties are added, and digits
+of those scripts alone keep the left-to-right path.
 
 The existing 21 native cases verify word/number order. Eighteen new original
 controls in tests/fixtures/bidi-layout exercise three full pages, narrow mixed
@@ -21755,8 +21833,10 @@ conversion and the paste (2026-10-16).
 
 Markdown (.md, with GitHub tables, task lists and strikethrough) and HTML files
 now open as new documents instead of the failure message. Markdown is rendered
-with the existing mdast libraries with raw HTML disabled; HTML uses the importer's
-existing body cleanup. Both then go through the formatted-paste conversion:
+with the existing mdast libraries; raw HTML in it is kept and goes through the same
+body cleanup as an HTML file (hidden content, scripts, styles, forms and embedded
+content are left out; updated 2026-10-27). HTML uses the importer's existing body
+cleanup. Both then go through the formatted-paste conversion:
 headings become Heading 1–6 (§17.7.4), lists become bullet or numbered paragraphs
 with nesting levels (§17.9), and bold, italic, underline, strikethrough,
 super/subscript, color and http(s), mailto and tel links become run properties and
@@ -21766,6 +21846,13 @@ quotations are not indented and pictures are omitted (the notice bar says how
 many were left out). Loading adds no undo step;
 the document autosaves like other imports. Browser regressions cover Markdown and
 HTML structure, links, script removal, autosave, export and reopen.
+
+### Horizontal rules in imported HTML and Markdown (2026-10-27)
+
+An `<hr>` (and Markdown's `---`, `***` thematic breaks) opens as an empty paragraph
+with a single bottom border (`w:pBdr/w:bottom`, §17.3.1.7, size 6, space 1), as
+Word draws a rule. A rule at the very start or end of the file is left out with
+the other leading and trailing empty blocks.
 
 ### Style-sheet formatting in imported HTML (2026-10-26)
 
@@ -22102,7 +22189,8 @@ Supported subset:
   paragraphs with an `annotationRef` run. The last paragraph carries a `w14:paraId` used by
   `commentsExtended`.
 - Add, reply, edit, resolve/reopen, delete a thread, delete all (or all resolved) comments, all
-  undoable. Creating the first comment adds the comments part, relationship and content type.
+  undoable. A thread is resolved when its first comment is `done` (Word marks only that one); deleting
+  resolved comments deletes such threads with their replies. Creating the first comment adds the comments part, relationship and content type.
   `commentsIds.xml`/`commentsExtensible.xml` entries for removed comments are dropped.
 - Untouched documents still save byte for byte.
 
@@ -22132,6 +22220,10 @@ Supported subset:
 - Inserting a footnote or endnote reference (§17.11.14 `footnoteReference`, §17.11.7
   `endnoteReference`) records the reference run as an insertion, written inside `w:ins`.
 - Replace All records each replacement as a deletion of the found text and an insertion.
+- A move (§17.13.5.21–.24 `moveFrom`/`moveTo` with their `moveFromRangeStart`/`moveToRangeStart` name) is one change:
+  accepting or rejecting either half, at the caret, in a selection or from its balloon, resolves both halves.
+- Reordering paragraphs (Sort, moving paragraphs with Alt+Shift+Up/Down or in the outline) cannot be recorded
+  and is refused while Track Changes is on.
 - A caption, cross-reference, citation, bibliography or table of contents inserted with Track Changes on is
   recorded as a tracked insertion (`w:ins`, with its paragraph marks) when the command inserts one stretch of
   text. A command that also renumbers or rewrites other text (a caption before existing ones, an IEEE citation,
@@ -22139,6 +22231,16 @@ Supported subset:
 - Updating fields (Update Fields, Update page references, mail merge previews) is not itself tracked; a
   result that was wholly a tracked insertion or deletion keeps that change after the update. The field's
   begin/separate/end characters are written outside `w:ins`/`w:del` (an approximation).
+- Table structure: the Delete key on selected cells records their text as deleted (the cells stay).
+  Edits that remove or rearrange table text as a whole are not recorded as revisions (row deletion,
+  §17.13.5.13 `w:trPr/w:del`, and cell revisions, §17.13.5.4 `w:cellDel` / §17.13.5.5 `w:cellMerge`,
+  are not written), so while tracking is on Delete Rows, Delete Columns, Delete Table, Delete Cells,
+  Merge Cells (including Split Cells over several cells and the table eraser), table Sort, Convert Text
+  to Table and Convert Table to Text refuse with "… cannot be tracked yet. Turn off Track Changes to do
+  this.", as paragraph Sort and outline moves do, instead of removing text a reviewer could not see or
+  reject. Inserting rows, columns and cells stays available; a Quick Table may merge the cells of the
+  table it has just inserted. Tests: `tests/table-editing.test.js` ("with Track Changes on"),
+  `tests/browser/table-block-tracked-cut.spec.js`.
 - All Markup (inline colour, underline and strikethrough with left-margin change bars), Simple
   Markup and No Markup (deleted text hidden), and Original (inserted text hidden).
 - Unchanged documents save byte for byte; revisions survive untracked edits and round trips.
@@ -22350,7 +22452,11 @@ screen only: · spaces, ° nonbreaking spaces, → tabs, ↵ text-wrapping break
 ¶ paragraph ends, ¤ cell ends, and labelled dotted rules for page, column and
 section breaks (labelled by how the next section starts, §17.6.22). Marks never
 reach print, PDF or the saved document. Headers, footers and text boxes do not
-show marks yet; hidden text (§17.3.2.14) and optional hyphens are not marked.
+show marks yet; hidden text (§17.3.2.14) is not marked. Optional hyphens
+(§17.3.3.29 `softHyphen`, and U+00AD in text) show as a small raised ¬ over a
+hairline at their position where they do not break the line; where one does,
+its hyphen is drawn. Unlike the reference application, the text is not reflowed
+to give the mark its own width.
 
 The [independent control](../tools/home_editing_fixture.py)
 (`public/fixtures/home-editing.docx`) has mixed runs, a character style with
@@ -23230,7 +23336,9 @@ Supported subset:
   convention for numbered drafts and a declared choice where the clause is silent.
 - Labels are right-aligned at `distance` left of the line's column (automatic:
   0.25 in; in multi-column sections at most half the column gap, minimum
-  0.0625 in), on the line's baseline, in the "line number" character style over
+  0.0625 in; with a line between columns, an automatic label of a later column
+  that would come within 2 px of that line is centered between the line and its
+  column instead, a preview policy), on the line's baseline, in the "line number" character style over
   the default paragraph style (else the document defaults). They paint on screen,
   in print and in the rasterized PDF pages.
 - `suppressLineNumbers` is resolved through paragraph styles and direct
@@ -23746,7 +23854,7 @@ Note setting changes apply immediately and are saved, but are not part of undo.
 | `TOC` | §17.16.5.68 | Generated from `\o` ranges and `\u` outline levels, `\t` style-to-level lists, `\c`/`\a` caption sequences (tables of figures) and `\f`/`\l` TC entries, scoped by `\b`. `\h` links entries, `\n` omits page numbers (all or a level range), `\p` replaces the tab, `\z` is kept. Unknown switches are retained on rebuild. Leaders and right alignment are paragraph tab stops (§17.3.1.37). Only whole-paragraph results rebuild; others refresh page numbers only. |
 | `TC` | §17.16.5.63 | Hidden entry (no separator, no result); text, `\f`, `\l`, `\n` are read for tables of contents. |
 | `PAGEREF` | §17.16.5.45 | As before; Update Table can scope the refresh to one table's references. |
-| `SEQ` | §17.16.5.56 | Captions write `\* ARABIC|alphabetic|ALPHABETIC|roman|ROMAN`; labels with spaces use underscores in the identifier. Chapter numbers (`\s`) are not evaluated. |
+| `SEQ` | §17.16.5.56 | Captions write `\* ARABIC|alphabetic|ALPHABETIC|roman|ROMAN`; labels are letters and digits of any script (`SEQ Рисунок`), and labels with spaces use underscores in the identifier. Chapter numbers (`\s`) are not evaluated. |
 | `REF` | §17.16.5.51 | Cross-references to headings, bookmarks, whole captions, label and number, or caption text, optionally followed by a `\p` above/below reference. |
 | `NOTEREF` | §17.16.5.40 | New: evaluates the note number of the note reference inside its bookmark (`\h`, `\f`, `\p`). The formatted variant is inserted as superscript text. |
 | `CITATION` | §17.16.5.8 | Inline result generated from the bibliography part: tag, `\m` extra sources, `\p` pages, `\f` prefix, `\s` suffix, `\v` volume, `\n`/`\y`/`\t` suppression, `\l` kept. Style change refreshes every citation. |
@@ -23905,7 +24013,9 @@ claim of full OOXML conformance or of layout fidelity with other consumers.
   `m:eqArr`, with child elements in schema order. Equations are atomic objects: the canvas shows
   their linear text; the editor dialog previews them as MathML. Edit Equation shows a selected
   equation in the input syntax, so that updating it unchanged builds the same structures (binomials
-  as `m:type="noBar"` fractions, `m:m`, `m:eqArr`, `m:deg`, multi-letter accents and bars). Gaps:
+  as `m:type="noBar"` fractions, `m:m`, `m:eqArr`, `m:deg`, multi-letter accents and bars). A
+  displayed equation of several lines (an `m:oMathPara` holding several `m:oMath`, §22.1.2.78)
+  shows one line of input for each and is written back the same way; Shift+Enter starts a line. Gaps:
   alignment points in equation arrays, delimiter separators, nested superscripts, two-dimensional
   canvas rendering; an edited equation loses structures the input syntax has no form for (`m:box`,
   `m:borderBox`, `m:groupChr`, `m:phant`, `m:sPre`, `m:limUpp` outside a function name, an n-ary
@@ -23946,8 +24056,11 @@ Ink is saved as ordinary DrawingML so every reader shows it; nothing depends on 
   `wp:posOffset`, relative to the paragraph that starts on the page at or above the ink (the run
   carrying the drawing is inserted at that paragraph's start), so ink moves with its text. Editing a
   group keeps its anchor paragraph and shifts the offsets; groups authored with `wp:align` or
-  percentage offsets are rewritten with page-relative offsets when edited. Pages on which no body
-  paragraph starts (one paragraph spanning the whole page, or a page of table) cannot take new ink.
+  percentage offsets are rewritten with page-relative offsets when edited. On a page where no body
+  paragraph starts, the ink is anchored in a table cell paragraph that starts on the page (in a cell,
+  `relativeFrom="page"` is measured from the cell, `layoutInCell="1"`), or else its run goes at the
+  start of the page's first line of a paragraph running on from an earlier page, with
+  `wp:positionV relativeFrom="line"` (§20.4.3.5) so the ink stays on the page it was drawn on.
 - Each stroke is a `wps:wsp` whose `a:custGeom` (§20.1.9.8) has one `a:path` (§20.1.9.15) tracing the
   stroke's filled outline with `a:moveTo`/`a:lnTo`/`a:close` in a 1/16-pixel path grid
   (`w`/`h`), empty `avLst`/`gdLst`/`ahLst`/`cxnLst`, `a:rect l t r b`, and `a:ln` with `a:noFill`.
@@ -24390,3 +24503,45 @@ reason in the document itself. Each row has a unit regression that fails without
 | Content type entries for created parts | ECMA-376 Part 2 §10.1.2 content types stream (`Override`, at most one per part name), §9.1.1 part names (compared case-insensitively) | Creating core properties, settings, numbering, styles, a header or footer, footnotes, endnotes or a picture part appended an `Override` without looking for one already naming that part. A package that kept an entry for a part it no longer contains (as some tools leave behind) was saved with two entries for the same part name, which is an invalid package. Every creator now sets the part's entry through one helper that reuses (and corrects the content type of) an existing entry, matching part names without regard to case, and removes repeats. Unit regression `tests/content-type-overrides.test.js`: a package with leftover entries for all eight kinds, each part created, exactly one entry per name with the needed type, and the result reopens; its XML parts pass `check:conformance` (the checker does not validate the content types stream). Comments, bibliography and mail-merge parts already checked for an entry and are unchanged. |
 | Tracked field code | §17.13.5.18 `ins`, §17.13.5.14 `del` (CT_RunTrackChange: runs, no `fldSimple`), §17.16.18 `fldChar`, §17.16.23 `instrText`, §17.16 `delInstrText` (deleted field code), §17.3.3.8 `delText` | A field inserted or deleted with Track Changes on has its code (begin, instruction, separator and end delimiters) inside the `w:ins` or `w:del`, and a deleted field's instruction is `w:delInstrText`. `w:delInstrText` made the whole document open read-only ("visible content inside a body field instruction"). A tracked field opened editable lost its tracking on save: the delimiters were written outside the change, so rejecting an inserted field (or accepting a deleted one), here or in Word, left an empty field behind, and accepting or rejecting here did the same. A field whose begin, separator and end delimiters sit in one change now keeps that change; saving writes its delimiters (and `w:delInstrText` for a deletion) inside the change, merged with its result; accepting or rejecting the change, at the caret, over a selection or for all changes, removes or keeps the whole field, and a deletion of another reviewer's insertion resolves as its text does. A field only partly inside a change keeps the earlier behaviour. Unit regression `tests/tracked-field-codes.test.js` (inserted, deleted and deleted-inserted fields: open, byte-identical save, delimiters inside the change after an edit, reopen, accept/reject all, at the caret and by reviewer, undo); edited exports pass `check:conformance`. Gaps: tracked fields in headers, footers and text boxes are not handled; a tracked field with an empty result (an index entry) is resolved only by resolving a stretch or all changes, and is not listed as a change of its own. |
 | Fields inserted or deleted while tracking | §17.13.5.18 `ins`, §17.13.5.14 `del`, §17.16.18 `fldChar` | With Track Changes on, inserting a field (Date and Time, Field, page numbers placed in the body, captions and cross-references) marked only its result inserted, and deleting a selection that took a whole field marked only its result deleted. Saved, the field's delimiters sat outside the change, so rejecting the insertion (or accepting the deletion) in Word, or here after reopening, left an empty field. The field's code is now part of the change: a field inserted while tracking (or added by a command whose insertion is then tracked) records the insertion; a deletion that takes a whole field, by the same rule an untracked deletion removes it (the selection reaches past at least one end), records the deletion, nested in another reviewer's insertion where there is one; the author's own inserted field is removed outright. Selecting exactly the result and deleting it deletes only the result, as it does untracked. Unit regression `tests/tracked-field-codes.test.js` (tracked insert, tracked command insertion, whole-field deletion saved, reopened and accepted, result-only deletion, own and other reviewers' fields). |
+| Main document part names | ECMA-376 Part 2 §8.3 package relationships, §9.1.1.1 part names (compared without regard to ASCII case), §10.1.2 content types; Part 1 §11.3.10 main document part | The main document part is the target of the package's `…/officeDocument` relationship, whatever its name. Packages whose main part is `word/document2.xml` (written by the Open XML SDK), whose relationship targets `./word/document.xml`, or whose relationship or `Override` names the part with other capitals (`/word/Document.xml`) were refused outright ("This file is not a supported DOCX document", "Unsupported DOCX document location", "Only standard .docx files are supported"). A main part stored under another name directly in `word/` is now renamed to `word/document.xml` on opening, with its relationships part, and the package relationship and content type entry are pointed at the new name; relative targets keep resolving because the folder does not change. A package whose main part is already `word/document.xml` is not rewritten. A main part in another folder, or one that competes with an existing `word/document.xml`, is still refused. Unit regression `tests/docx-main-part.test.js` (four variants: editable open, styles resolve, saved names, reopen; untouched package parts byte for byte; refusals). |
+| Password-protected and Word 97–2003 files named .docx | [MS-CFB] §2.2 compound file header signature; [MS-OFFCRYPTO] §2.3.4.4 `EncryptedPackage` stream; [MS-DOC] `WordDocument` stream | A password-protected Word document is an OLE compound file holding the encrypted package, not a ZIP package, and so is a Word 97–2003 document saved with a `.docx` name. Both failed with "Could not read this DOCX archive: invalid zip data". A compound file is now recognized by its signature and the message says what to do: remove the password in Word, or save the file as `.docx` there. Nothing is decrypted or converted. Unit regression `tests/docx-open-errors.test.js`. |
+| Imported external content in the preview | ECMA-376 Part 1 §17.17.2.1 `altChunk`, §11.3.1 Alternative Format Import part; RFC 2557 MIME HTML, RFC 2045 transfer encodings | html-docx-js and document-assembly tools that merge files write a whole document as a `w:altChunk` naming an HTML page, a MIME HTML archive, plain text or another WordprocessingML package, and leave its conversion to the consumer. Such a document opens read-only (the chunk is not converted), and its preview was an empty page. The read-only preview now shows the chunk's text where the `altChunk` stands, in the body or a table cell: HTML block elements become paragraphs with bold and italic runs (the first `text/html` part of a MIME HTML archive, quoted-printable or base64, with its declared charset), plain text becomes one paragraph per line, and an embedded package shows its body text as the plain-text preview does. Scripts, styles and pictures in the HTML are not shown, nothing is fetched, and saving still keeps the original file. RTF chunks and chunks in headers or footers stay out of the preview. Unit regression `tests/alt-chunk-preview.test.js` (MIME HTML as html-docx-js writes it, a windows-1252 page, text, an embedded package in a table cell, unreadable chunks). |
+| Imported list number formats | ECMA-376 Part 1 §17.9.17 `numFmt`, §17.18.59 ST_NumberFormat, §17.9.11 `lvlText` | A list level in any number format other than decimal, zero-padded decimal, letters, Roman numerals, bullets and none opened the whole document read-only ("Unsupported numbering format"), which took in most Chinese, Japanese and Korean documents (一、二、 ①②③ 가나다) and legal ones (First, 1st). These formats are now numbered and editable: `decimalHalfWidth`, `decimalFullWidth`, `decimalFullWidth2`, `decimalEnclosedCircle`, `decimalEnclosedCircleChinese` (①–㊿), `decimalEnclosedParen` and `decimalEnclosedFullstop` (1–20), `ordinal`, `cardinalText`, `ordinalText` (English, capitalized words), `chicago`, `chineseCounting` and `japaneseCounting` (below 100,000,000; Chinese writes 零 for skipped places and keeps 一 before 百 and 千, Japanese does neither), `ideographDigital`, `ideographTraditional` (甲–癸), `ideographZodiac` (子–亥), `aiueo` and `aiueoFullWidth` (46 kana), `ganada` and `chosung` (14), and `numberInDash`. §17.18.59 defines these sequences by example only; a value past a sequence's characters is written in decimal digits, an approximation of this editor. The format is kept in `numbering.xml` through edits and save; the list dialogs still offer only their own styles. Korean, Hebrew, Arabic and iroha formats are added in the next row; other formats (Hindi, Thai, Vietnamese, Russian, the half-width iroha, …) and custom `w:format` strings still open read-only. Unit regression `tests/imported-numbering-formats.test.js`; rejection fixtures that used `decimalEnclosedCircle` or `chicago` as their unsupported format now use `thaiCounting`. |
+| List number formatting switched off | ECMA-376 Part 1 §17.9.24 level `rPr`, §17.3.2 run properties (§17.3.2.41 `vanish`, §17.3.2.23 `outline`, §17.3.2.31 `shadow`, §17.3.2.13 `emboss`, §17.3.2.18 `imprint`, §17.3.2.44 `webHidden`, §17.3.2.21 `noProof`, §17.3.2.12 `em`, §17.3.2.11 `effect`, §17.3.2.15 `highlight`, §17.3.2.4 `bdr`) | Word's Font dialog for a list level writes every option it shows, switched off where unused (`<w:vanish w:val="0"/>`, `<w:em w:val="none"/>` …), as legal and outline numbering templates carry. Any of these made the whole document open read-only ("Unsupported numbering symbol formatting: vanish"). Declarations that state no effect on the number (the on/off properties `vanish`, `outline`, `shadow`, `emboss`, `imprint`, `webHidden`, `specVanish`, `rtl`, `cs`, `oMath` declared off; `em`, `effect` and `highlight` of `none`; a `bdr` of `none` or `nil`; and `noProof`, which affects proofing only) are now ignored and kept in `numbering.xml`. The same properties switched on still open read-only, and `strike` with `dstrike` in one property set keeps its documented rejection. Unit regression `tests/numbering-inert-marker-properties.test.js`. |
+| Document properties in fields | ECMA-376 Part 2 §11 core properties (relationship-named part, §11.1 elements); Part 1 §17.16.5 `TITLE`, `AUTHOR`, `SUBJECT`, `KEYWORDS`, `COMMENTS`, `LASTSAVEDBY`, `DOCPROPERTY` | Fields that show a document property, Quick Parts > Document Property and the cover-page title read the properties from `docProps/core.xml` as the file was opened. A title or author set in File > Info was ignored until the document was saved and reopened, and a package whose core properties part the package relationship names elsewhere (System.IO.Packaging writes `package/services/metadata/core-properties/<id>.psmdcp`) showed none. They now read the part the relationship names, with this session's edits over it. Extended properties (company, manager, template) are still read from `docProps/app.xml`. Unit regression `tests/document-property-fields.test.js`; browser regression `tests/browser/document-property-fields.spec.js`. |
+| Core properties relationship without its part | ECMA-376 Part 2 §8.3 (a package has at most one core properties relationship), §11 core properties part, §10.1.2 content types | A package whose core properties relationship names a part it does not contain (metadata scrubbers delete `docProps/core.xml` and leave the relationship) got a second core properties relationship when a property was set, so the saved package was invalid. The part is now created at the existing relationship's target, with its content type entry. Unit regression `tests/core-properties-missing-part.test.js`. |
+| Paired strike declarations | ECMA-376 Part 1 §17.3.2.37 `strike`, §17.3.2.9 `dstrike`, §17.17.4 on/off values; §17.7.2–17.7.3 style hierarchy | Word, Pages and legal templates write `<w:strike w:val="0"/><w:dstrike w:val="0"/>` (or one form on with the other off) in runs, styles and list levels. That opened the whole document read-only ("strike and dstrike on the same property set"), a policy that treated a pair of off declarations as a conflict. A pair is now one declaration of both forms (`bothStrikeOff`, `singleStrikeDoubleOff`, `doubleStrikeSingleOff`), resolved like the paired capitalization flags: each half applies to its own form independently, including character-style toggles for single strike, and the form left on is shown (none if neither). Untouched XML is kept; a style edited to a pair writes both elements; a direct change writes one form as before. Both forms on in one property set still opens read-only. The style dialog offers the three pairs. Unit regression `tests/strike-pairs.test.js` (direct, paragraph-style, character-style and list-level pairs; on/off mixes; edit, save, reopen; both on refused); `tests/canvas-strikethrough.test.js` and `tests/browser/strikethrough.spec.js` now use both on as the conflicting form; the export passes `check:conformance`. |
+| Character-unit indents | ECMA-376 Part 1 §17.3.1.12 `ind` (`leftChars`/`startChars`, `rightChars`/`endChars`, `firstLineChars`, `hangingChars`: hundredths of a character unit, overriding `left`, `right`, `firstLine` and `hanging` when present); §17.7.2 style hierarchy | Chinese and Japanese documents from Word and WPS indent nearly every paragraph in character units ("two characters" first-line indents), so they opened read-only ("character-unit paragraph indents"). A nonzero character-unit value now overrides its twips companion in direct, style and table-style paragraph properties, for layout, the ruler and list geometry; zero leaves the twips value in force, as before. §17.3.1.12 does not define the character unit; Word measures it by the East Asian font size of the Normal style (a full-width character is one em wide), so it is that size in twips (10.5 pt makes 200 hundredths 420 twips) and follows a change to Normal. A `hangingChars` value wins over `firstLineChars`. Untouched `ind` elements are saved as authored. An edited indent is written in twips and its character-unit form is written as `0` (in the paragraph or style that is edited, whenever the paragraph declares one or inherits a nonzero one), so Word, which also prefers character units, reads the same distance; an indent cleared to inherit removes both forms from the style. Gaps: the character pitch of a `linesAndChars`/`snapToChars` document grid is not used; character-unit indents on numbering levels still open read-only. Unit regression `tests/character-unit-indents.test.js` (sizes and layout offsets, untouched attributes, paragraph and style edits including an inherited character-unit indent, reopen); `tests/canvas-indents-tabs.test.js` now expects the inherited hanging characters to apply; the edited export passes `check:conformance`. |
+| Highlight none in styles | ECMA-376 Part 1 §17.3.2.15 `highlight` (`none`); [MS-OI29500] §§2.1.245, 2.1.248, 2.1.260, 2.1.291 | A document default or style declaring `<w:highlight w:val="none"/>` opened the whole document read-only ("highlighting in document defaults, named styles or numbering definitions"), although it highlights nothing. It is now accepted and kept as authored; any other highlight value in those places still opens read-only. Unit regression `tests/style-highlight-none.test.js` (document defaults, paragraph and character styles; styles part saved byte for byte). |
+| Comment styles for new comments | ECMA-376 Part 1 §17.13.4.2 `comment`, §17.13.4.5 `commentReference`, §17.7.4.17 `style`; built-in style names "annotation text" and "annotation reference" | New comments are written with the paragraph style `CommentText` and a reference run in the character style `CommentReference`, as Word writes them, but a document that had no comments usually defines neither, so the saved file referred to undefined styles. When a comment is added, the styles part now gets Word's definitions of whichever is missing (`annotation text`: based on the default paragraph style, single line spacing, 10 pt; `annotation reference`: based on the default character style, 8 pt; both priority 99, semi-hidden, unhidden when used). Existing definitions are left as they are, unchanged comments do not touch the styles part, and a package without a styles part is not given one. Unit regression `tests/comment-styles.test.js`; the export passes `check:conformance`. |
+| Revised document author in Compare | ECMA-376 Part 2 §11 core properties (the part the package relationship names; `cp:lastModifiedBy`, `dc:creator`) | Compare labels the revised document's changes with its last author. It read `docProps/core.xml` by name, so a package whose core properties part has another name (System.IO.Packaging's `package/services/metadata/core-properties/<id>.psmdcp`) gave no author and the changes fell back to the user's name. It now reads the relationship-named part, as document property fields do. Unit regression in `tests/compare-documents.test.js` (its fixture package now declares the core properties relationship). |
+| More imported list number formats | ECMA-376 Part 1 §17.9.17 `numFmt`, §17.18.59 ST_NumberFormat | Extends "Imported list number formats": `koreanCounting` (Sino-Korean numerals with 십 백 천 만, one dropped before 십, 백 and 천, as in Japanese), `koreanDigital` (digit by digit, 영 for zero), `hebrew1` (Hebrew letter numerals below 1000, with טו and טז for 15 and 16), `hebrew2` (the 22 letters), `arabicAbjad` and `arabicAlpha` (28 letters each, from أ) and `irohaFullWidth` (47 kana) are now numbered and editable. Values past a sequence, and Hebrew numerals from 1000, are written in decimal digits (this editor's approximation). Hebrew and Arabic labels are laid out in the paragraph's direction; right-to-left paragraphs remain unsupported. The rejection fixtures now use `thaiCounting` as their unsupported format. Unit regression in `tests/imported-numbering-formats.test.js`. |
+
+## Word watermarks (VML in headers and footers)
+
+Clauses: ECMA-376 Part 1 §17.3.3.19 `w:pict`; Part 4 §14.1 VML (`v:shape`, `v:shapetype`,
+`v:textpath`, `v:imagedata`, `v:fill`), with the `mso-position-*` style properties Word writes.
+
+Word's Design > Watermark puts a VML shape in a header paragraph: a WordArt text path
+(`PowerPlusWaterMarkObject…`, e.g. "CONFIDENTIAL") or a picture (`WordPictureWatermark…`, washed out
+with `gain`/`blacklevel`), absolutely positioned behind the text. A `w:pict` in a header or footer
+whose only shape is such a watermark no longer makes the document open read-only. It is one retained
+object in its paragraph (one document position, no width in the line): its XML is saved unchanged,
+also when the header's text is edited, and its image part and relationship are kept. It can be deleted
+with the header's text; it cannot be edited or inserted. Design › Watermark treats it as the
+document's watermark, as Word does: the gallery and the Custom Watermark dialog show it (text, font,
+colour, see-through and diagonal or horizontal layout, read as Auto size; a PNG or JPEG picture with its
+washout), choosing a watermark replaces it, and Remove Watermark removes it from every header (the
+headers' own text stays; the picture's part and relationship are left in place, unused). While the
+watermarks are not changed, Word's XML is saved as it was.
+
+Display (an approximation): on each page whose header or footer holds one, the watermark is drawn
+beneath the page's other content, in its box placed by `mso-position-horizontal/vertical`
+(`center`, `left`/`top`, `right`/`bottom`, or `margin-left`/`margin-top` offsets) relative to the
+margins or the page, and turned by its `rotation`. A text watermark is its string in its
+`font-family`, stretched to fill the box (`v:textpath fitshape`), in its `fillcolor` (named or hex) at
+its `v:fill opacity`; a picture watermark (PNG, JPEG or GIF) is drawn at its `gain` as opacity. Gaps:
+other VML in `w:pict` (and any VML in the body) still opens read-only; `blacklevel`, text-path
+adjustments, outlines, `fitpath` and wrapping other than behind the text are not drawn; watermarks are
+not shown in Read and Web views, which show no headers. Fixture: `tests/fixtures/vml-watermarks`
+(independently generated). Tests: `tests/vml-watermarks.test.js`, `tests/browser/vml-watermarks.spec.js`.

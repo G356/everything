@@ -94,6 +94,16 @@ export function materializeDrawing(pkg, model, image) {
   return { drawing, parts: found, sourcePart };
 }
 
+/**
+ * A drawing's XML as saving would write it now. A drawing keeps the XML it was opened or formatted with,
+ * and later edits made on the model (a move, a resize, a turn or flip, alt text) are written over it on
+ * save, so the kept XML alone describes how it was. Falls back to the kept XML when it cannot be rebuilt.
+ */
+export function currentDrawingXml(pkg, model, image) {
+  if (!image?.shell || !pkg || !model || !Object.keys(image).some(key => key.endsWith('Changed') && image[key])) return image?.shell || null;
+  try { return standalone(materializeDrawing(pkg, model, image).drawing); } catch { return image.shell; }
+}
+
 /** Bind every prefix the drawing uses on its root, so it serializes as a standalone fragment. */
 function standalone(drawing) {
   const copy = drawing.cloneNode(true), declared = new Map();
@@ -163,6 +173,50 @@ export async function formatDrawing(editor, image, edit, { label = 'drawing' } =
 }
 
 /**
+ * Rewrite several drawings with the same edit as one undo step (Hide All, Compress Pictures on every
+ * picture). Drawings the edit leaves unchanged are skipped. Returns how many changed; throws, changing
+ * none, when one cannot be rewritten.
+ */
+export async function formatDrawings(editor, targets, edit, { label = 'drawing' } = {}) {
+  if (editor.readOnly) throw new Error('This document is read-only.');
+  const pkg = editor.shapePackage?.();
+  if (!pkg) throw new Error('Formatting is not available for this document.');
+  editor.finishComposition?.();
+  const model = editor.model, revision = editor.session.revision, fragments = [];
+  for (const image of targets) {
+    if (!images(model).includes(image)) throw new Error(`Select the ${label} again.`);
+    const { drawing, parts } = materializeDrawing(pkg, model, image), added = [];
+    const context = {
+      parts,
+      addPart(bytes, contentType, stem = 'canvas-edit') {
+        const extension = Object.entries(CONTENT_TYPES).find(([, type]) => type === contentType)?.[0] || 'bin';
+        const used = new Set([...fragments.flatMap(f => f.added.map(a => a.path))]);
+        let part; do part = freshPart(model, pkg.parts, 'media', stem, extension); while (used.has(part.path) || [...fragments.flatMap(f => f.added)].some(a => a.relId === part.relId));
+        added.push({ ...part, bytes, contentType, relType: REL_TYPES.image });
+        return part.relId;
+      },
+      partBytes(relId) { return parts.get(relId)?.bytes || added.find(part => part.relId === relId)?.bytes || null; },
+      release(relId) { const part = parts.get(relId); if (part?.existing && part.path) (pkg.releasedMedia ||= new Set()).add(part.path); },
+    };
+    const before = new XMLSerializer().serializeToString(drawing);
+    const result = await edit(drawing, context);
+    if (result === false || new XMLSerializer().serializeToString(drawing) === before) continue;
+    reserveRotatedBounds(drawing, image);
+    fragments.push({ image, added, fragment: await readFormattedDrawing(pkg, model, image, drawing, parts, added) });
+  }
+  if (!fragments.length) return 0;
+  const ok = await applyDrawingFragments(editor, fragments.map(f => f.fragment), model => {
+    const replaced = new Map(fragments.map(({ image, fragment }) => [image, { ...fragment.image, id: image.id }]));
+    if ([...replaced.keys()].some(image => !images(model).includes(image))) throw new Error('The document changed while the drawings were prepared. Try again.');
+    model.checkpoint();
+    for (const p of model.paragraphs) for (const run of p.runs) if (replaced.has(run.image)) run.image = replaced.get(run.image);
+    model.didChange();
+    return true;
+  }, { revision });
+  return ok ? fragments.length : 0;
+}
+
+/**
  * A picture's frame reserves room for its rotated bounds (wp:effectExtent), which the reader takes as saved.
  * An edit that turns or resizes the picture through its XML (the rotation handle, Rotate, Reset Picture,
  * Size and Position, a tilted picture style) reserves them anew, as the model does for its own edits:
@@ -174,9 +228,12 @@ export function reserveRotatedBounds(drawing, image) {
   const extent = xml.child(frame, WP, 'extent'), transform = xml.child(properties, A, 'xfrm');
   const next = { ...image, width: Number(extent?.getAttribute('cx')), height: Number(extent?.getAttribute('cy')), rotation: normalizedRotation(Number(transform?.getAttribute('rot') || 0)) };
   delete next.effectExtent;
+  // An edit may also take the picture in line or let it float: an inline frame turns with the picture
+  // (a quarter turn swaps its sides), while a floating one keeps its sides and reserves the turned bounds.
+  if (frame.localName === 'inline') delete next.anchor; else next.anchor = image.anchor || {};
   if (!(next.width > 0 && next.height > 0)) return;
-  if (next.width === image.width && next.height === image.height && next.rotation === normalizedRotation(image.rotation)) return;
   const oldRequired = rotationOutsets(image), nextRequired = rotationOutsets(next), oldExtent = imageExtents(image);
+  if (next.width === image.width && next.height === image.height && next.rotation === normalizedRotation(image.rotation) && CROP_SIDES.every(side => oldRequired[side] === nextRequired[side])) return;
   let effect = xml.child(frame, WP, 'effectExtent');
   if (!effect) { effect = xml.make(frame.ownerDocument, WP, 'effectExtent'); extent.after(effect); }
   for (const [side, key] of CROP_SIDES.map((side, i) => [side, 'ltrb'[i]])) effect.setAttribute(key, String(nextRequired[side] + Math.max(0, oldExtent[side] - oldRequired[side])));

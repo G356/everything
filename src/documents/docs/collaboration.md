@@ -58,7 +58,15 @@ equal changes. So:
   paragraph keep one value (Yjs's deterministic winner);
 - tables, styles, list definitions and page settings are atomic registers: concurrent edits to
   different tables or styles merge; to the same table, the last structural change wins while the
-  text people typed in its cells stays (cells are body paragraphs).
+  text people typed in its cells stays (cells are body paragraphs);
+- a table cell's characters and marks are its own in the diff: one matches only the same character
+  of the same cell (the body's still match each other). A row or column added or removed therefore
+  inserts or deletes whole cells, rather than keeping another cell's mark or letters and relabelling
+  them, and text someone types in another cell meanwhile stays in that cell. New paragraphs of a
+  cell are written before its last mark, inside the cell, not where a new row or column would go;
+- a paragraph left in a cell that is gone (split in a cell while someone else deletes its row or
+  column) is read into the cell before it (at a table's start, the one after it; outside a table,
+  the body), without moving anything in the shared text, so it is kept and the table stays whole.
 
 **Reading remote changes.** An update from someone else is applied to the Yjs document (after this
 person's pending changes are written, so the diff never mistakes their text for a deletion), the
@@ -129,7 +137,9 @@ plus a notice; it composes with the document's own Restrict Editing guard.
 **Offline.** Every local change is queued in IndexedDB (memory where unavailable) before it is sent
 and kept until the room accepts it; the title bar shows *Offline · N waiting*; changes go out when
 the connection returns, also after a reload of the same room in this browser (Yjs updates are
-idempotent, so a change delivered twice is harmless). Changes refused for good (access removed)
+idempotent, so a change delivered twice is harmless). Queued changes name the account that made
+them: only that account's next visit to the room sends them, so someone else signed in on the same
+computer neither sends them as theirs nor has them refused and thrown away. Changes refused for good (access removed)
 are dropped and the person is told. In a tab that does not save the file (a guest's), changes the
 room has not received exist nowhere else: closing the tab warns, and leaving the document sends
 them first and asks when they cannot go out.
@@ -212,6 +222,10 @@ Puter's AI (the playground) the pane, its buttons and menu items are not offered
 
 - Concurrent changes to the same table's structure keep one person's structure (atomic register);
   concurrent creation of new list definitions with the same numbering id keeps one definition.
+- Typing into an empty cell (or at the very start of a cell) right where someone else inserts a row
+  or column at the same moment shares one place in the shared text with the new cells; Yjs orders
+  the two insertions by client, so that text can land in one of the new cells. Text typed in a cell
+  someone else deletes stays, in the cell after it.
 - Header, footer and note stories are atomic per story: two people editing one header at once keep
   one person's version.
 - Document-level settings outside the model (Restrict Editing's protection, review settings,

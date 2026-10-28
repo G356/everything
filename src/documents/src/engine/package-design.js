@@ -8,6 +8,8 @@
 import { strFromU8, strToU8, unzipSync } from 'fflate';
 import { relatedPartPath } from './docx-relationships.js';
 import { parseXml } from './docx-xml.js';
+import { readVmlWatermark } from './vml-watermarks.js';
+import { imageInfo } from './images.js';
 import { relationshipPartPath, relativePartTarget, zipPackage } from './package-part-paths.js';
 import { createPageStoryPart } from './docx-page-story-create.js';
 import { themeColorTransform } from './colors.js';
@@ -469,14 +471,20 @@ function watermarkHeaders(parts, create) {
   return [...paths];
 }
 const isWatermark = drawing => [...drawing.getElementsByTagNameNS(NS.wp, 'docPr')].some(n => n.getAttribute('name') === WATERMARK_NAME);
+/**
+ * Take the document's watermark out of a header: the drawing this editor wrote, and a watermark Word
+ * wrote (a VML shape in w:pict, vml-watermarks.js), so a new watermark replaces it and Remove
+ * Watermark removes it, as in Word. A run left holding nothing but its properties goes too.
+ */
 function removeWatermarkRuns(doc) {
   let removed = false;
-  for (const drawing of [...doc.getElementsByTagNameNS(W, 'drawing')]) {
-    if (!isWatermark(drawing)) continue;
-    const run = drawing.parentNode;
-    if (run?.namespaceURI === W && run.localName === 'r') run.remove(); else drawing.remove();
-    removed = true;
-  }
+  const take = node => {
+    const run = node.parentNode;
+    node.remove(); removed = true;
+    if (run?.namespaceURI === W && run.localName === 'r' && [...run.children].every(n => n.namespaceURI === W && n.localName === 'rPr')) run.remove();
+  };
+  for (const drawing of [...doc.getElementsByTagNameNS(W, 'drawing')]) if (isWatermark(drawing)) take(drawing);
+  for (const pict of [...doc.getElementsByTagNameNS(W, 'pict')]) if (readVmlWatermark(pict)) take(pict);
   return removed;
 }
 /**
@@ -488,7 +496,11 @@ export function readWatermark(parts) {
   for (const path of watermarkHeaders({ ...parts }, false)) {
     const doc = readPart(parts, path);
     const drawing = [...doc.getElementsByTagNameNS(W, 'drawing')].find(isWatermark);
-    if (!drawing) continue;
+    if (!drawing) {
+      const word = wordWatermark(parts, path, doc);
+      if (word) return word;
+      continue;
+    }
     const docPr = drawing.getElementsByTagNameNS(NS.wp, 'docPr')[0];
     let watermark;
     try { watermark = JSON.parse(docPr.getAttribute('descr') || 'null') || { kind: 'text' }; } catch { return { kind: 'text' }; }
@@ -498,6 +510,24 @@ export function readWatermark(parts) {
       if (media && parts[media] instanceof Uint8Array) Object.assign(watermark, { bytes: parts[media], mime: /\.png$/i.test(media) ? 'image/png' : 'image/jpeg' });
     }
     return watermark;
+  }
+  return null;
+}
+/**
+ * A watermark Word wrote (VML in w:pict) in the terms of the Watermark dialog, or null. Word fits a text
+ * watermark to its box, so its size reads as Auto; a turned one is diagonal, and one Word made see-through
+ * is semitransparent. A picture watermark brings its picture (PNG or JPEG), size in pixels and washout.
+ */
+function wordWatermark(parts, path, doc) {
+  for (const pict of doc.getElementsByTagNameNS(W, 'pict')) {
+    const vml = readVmlWatermark(pict);
+    if (!vml) continue;
+    if (vml.kind === 'text') return { kind: 'text', text: vml.text, font: vml.font || null, size: 'auto', color: vml.color || 'C0C0C0', semitransparent: vml.opacity < 1, layout: Math.round(vml.rotation) % 180 ? 'diagonal' : 'horizontal' };
+    const media = relationshipTarget(parts, path, vml.imageRel);
+    let info = null;
+    try { info = media && parts[media] instanceof Uint8Array ? imageInfo(parts[media]) : null; } catch { info = null; }
+    const picture = { kind: 'picture', scale: 'auto', washout: vml.gain < 1 };
+    return info && ['image/png', 'image/jpeg'].includes(info.mime) ? { ...picture, bytes: parts[media], mime: info.mime, width: info.width, height: info.height } : picture;
   }
   return null;
 }

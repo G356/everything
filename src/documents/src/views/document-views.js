@@ -177,17 +177,31 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
     sideToSide = on;
     engine.pages.classList.toggle('is-side-to-side', on);
     host.classList.toggle('is-side-to-side', on);
+    // Comment cards go beside each page (review.js), which keeps room for them.
+    if (on) host.dataset.cardPages = '1'; else if (mode !== 'read') delete host.dataset.cardPages;
+    showThumbnails(on && thumbnails);
     if (on) {
       engine.pages.classList.remove('is-multipage');
-      // Whole pages, side by side: fit a page's height to the window.
-      const tallest = Math.max(...engine.layout.pages.map(p => p.height));
-      w.setZoom?.(Math.max(0.1, Math.min(2, Math.floor((host.clientHeight - 40) / tallest * 100) / 100)));
+      fitSideToSide();
       engine.pages.classList.add('is-side-to-side');
     } else if (!silent) w.setZoom?.(1);
-    thumbStrip.hidden = !(on && thumbnails);
-    if (on && thumbnails) paintThumbnails({ all: true });
     revealCaretHorizontally();
     if (!silent) { layoutChanged(); onState(); }
+  }
+  /** Whole pages, side by side: fit a page's height to the window. */
+  function fitSideToSide() {
+    const engine = ready(); if (!engine) return;
+    const tallest = Math.max(...engine.layout.pages.map(p => p.height));
+    w.setZoom?.(Math.max(0.1, Math.min(2, Math.floor((host.clientHeight - 40) / tallest * 100) / 100)));
+  }
+  /** The strip lies over the foot of the surface; the pages, which do not scroll up or down here, end above it. */
+  function showThumbnails(on) {
+    thumbStrip.hidden = !on;
+    if (on) paintThumbnails({ all: true });
+    host.style.marginBottom = on ? `${thumbStrip.offsetHeight}px` : '';
+    // So does the Assistant's button, which sits at the foot of the editor.
+    if (on) surface.parentElement?.style.setProperty('--view-thumbnails-height', `${thumbStrip.offsetHeight}px`);
+    else surface.parentElement?.style.removeProperty('--view-thumbnails-height');
   }
   // Shown afresh, every page is painted and every thumbnail drawn. After that a thumbnail is drawn again
   // only when its page has been painted (thumbOverlay), or is a new page or a new size. Typing paints
@@ -239,15 +253,23 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
   }
 
   /* ---- Zoom: Ctrl/Cmd + wheel and trackpad pinch (which arrives as a Ctrl + wheel) ---- */
+  // The zoom the wheel is heading to before rounding to whole percents, while the zoom is still the
+  // one it last set: a pinch's events are each too small to change the rounded zoom on their own.
+  let wheelZoom = null;
   host.addEventListener('wheel', e => {
     const engine = editor(); if (!engine) return;
     if (e.ctrlKey || e.metaKey) {
       if (mode === 'read' || mode === 'outline') return;
       e.preventDefault();
-      const from = engine.zoom, to = Math.max(0.1, Math.min(2, Math.round(from * Math.exp(-e.deltaY * (e.deltaMode ? 0.05 : 0.0025)) * 100) / 100));
-      if (to === from) return;
-      // Keep the point under the pointer where it is.
-      w.setZoom?.(to, { clientX: e.clientX, clientY: e.clientY });
+      const from = wheelZoom?.shown === engine.zoom ? wheelZoom.exact : engine.zoom;
+      const exact = Math.max(0.1, Math.min(2, from * Math.exp(-e.deltaY * (e.deltaMode ? 0.05 : 0.0025))));
+      const to = Math.round(exact * 100) / 100;
+      // Rounding must not move a fractional zoom (Page width) against the direction of the wheel.
+      if (to !== engine.zoom && Math.sign(to - engine.zoom) === Math.sign(exact - engine.zoom)) {
+        // Keep the point under the pointer where it is.
+        w.setZoom?.(to, { clientX: e.clientX, clientY: e.clientY });
+      }
+      wheelZoom = { exact, shown: engine.zoom };
     } else if (sideToSide && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
       // Side to side: the wheel turns pages across.
       e.preventDefault(); host.scrollLeft += e.deltaY;
@@ -494,7 +516,7 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
     const has = () => !!ready();
     const vertical = command('Vertical', 'verticalMovement', () => setSideToSide(false), { size: 'large', attrs: { 'aria-pressed': 'true' } });
     const across = command('Side to Side', 'sideToSide', () => setSideToSide(true), { size: 'large', text: 'Side to Side', attrs: { 'aria-pressed': 'false' } });
-    const thumbs = command('Thumbnails', 'thumbnails', () => { thumbnails = !thumbnails; thumbStrip.hidden = !(sideToSide && thumbnails); paintThumbnails({ all: true }); onState(); }, { text: 'Thumbnails', attrs: { 'aria-pressed': 'false' } });
+    const thumbs = command('Thumbnails', 'thumbnails', () => { thumbnails = !thumbnails; showThumbnails(sideToSide && thumbnails); if (sideToSide) fitSideToSide(); onState(); }, { text: 'Thumbnails', attrs: { 'aria-pressed': 'false' } });
     when(vertical, has, () => String(!sideToSide)); when(across, () => has() && mode !== 'outline', () => String(sideToSide));
     when(thumbs, () => has() && sideToSide, () => String(sideToSide && thumbnails));
     const newWin = command('New Window', 'newWindow', newWindow, { size: 'large', text: 'New Window' });
@@ -526,7 +548,8 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
     const promote = command('Promote', 'promote', () => outline.promote(), { shortcut: `${outline.shortcutHint}+Left` });
     const levelMenu = menuButton('Outline Level', 'outlineView', () => outline.levelNames.map((label, i) => ({ label, radio: true, checked: level() === i + 1, onSelect: () => outline.setLevel(i + 1) })), { size: 'small', text: 'Outline Level' });
     const demote = command('Demote', 'demote', () => outline.demote(), { shortcut: `${outline.shortcutHint}+Right` });
-    const toBody = command('Demote to Body Text', 'demoteBody', () => outline.demoteToBody(), { shortcut: `${MOD_KEY}+Shift+N` });
+    // Ctrl+Shift+N on a Mac too, where Cmd+Shift+N opens a private window and never reaches the page.
+    const toBody = command('Demote to Body Text', 'demoteBody', () => outline.demoteToBody(), { shortcut: 'Ctrl+Shift+N' });
     const up = command('Move Up', 'moveUp', () => outline.moveUp(), { shortcut: `${outline.shortcutHint}+Up` });
     const down = command('Move Down', 'moveDown', () => outline.moveDown(), { shortcut: `${outline.shortcutHint}+Down` });
     const expand = command('Expand', 'expand', () => outline.expand(), { shortcut: `${outline.shortcutHint}+Plus` });

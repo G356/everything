@@ -351,3 +351,68 @@ describe('web page lists numbered with letters or Roman numerals', () => {
     }
   });
 });
+
+describe('equations and symbols', () => {
+  const MATH = '<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>E=mc2</m:t></m:r></m:oMath>';
+  const doc = () => {
+    const d = blankDoc();
+    d.replace('Energy: ');
+    d.insertMathRun({ xml: MATH, text: 'E=mc2' });
+    d.replace(' then ');
+    // Symbols inserted with Word's Insert Symbol (w:sym): one a Unicode arrow, one in a symbol font's private range.
+    const at = d.paragraphs[0].runs.at(-1);
+    d.paragraphs[0].runs.push({ ...at, text: '￼', bodySymbol: { font: 'Arial', code: '2192' } }, { ...at, text: ' next', bodySymbol: undefined },
+      { ...at, text: '￼', bodySymbol: { font: 'Wingdings', code: 'F0FC' } }, { ...at, text: ' done', bodySymbol: undefined });
+    return d;
+  };
+  it('keep their text in every format, as copying them does', () => {
+    expect(documentPlainText(doc())).toBe('Energy: E=mc2 then → next done\n');
+    expect(documentMarkdown(doc())).toBe('Energy: E=mc2 then → next done\n');
+    expect(body(documentHtml(doc()))).toBe('<p>Energy: E=mc2 then → next done</p>');
+  });
+});
+
+describe('a list numbered again part-way through', () => {
+  const doc = () => {
+    const d = blankDoc();
+    d.replace('a'); d.toggleList('number');
+    d.insertParagraph(); d.replace('b');
+    d.insertParagraph(); d.replace('c'); d.restartNumbering(1);
+    d.insertParagraph(); d.replace('d');
+    return d;
+  };
+  it('keeps its numbers in a web page and in Markdown', () => {
+    expect(documentPlainText(doc())).toBe('1.\ta\n2.\tb\n1.\tc\n2.\td\n');
+    // A browser numbers each item one past the one before unless told otherwise.
+    expect(body(documentHtml(doc()))).toBe('<ol><li>a</li><li>b</li><li value="1">c</li><li>d</li></ol>');
+    // CommonMark takes only a list's first number: the restarted items start a list of their own.
+    const markdown = documentMarkdown(doc());
+    expect(markdown).toBe('1. a\n2. b\n\n<!-- -->\n\n1. c\n2. d\n');
+    const html = markdownHtml(markdown);
+    expect([...html.matchAll(/<ol(?: start="(\d+)")?>/g)].map(m => m[1] ?? '1')).toEqual(['1', '1']);
+  });
+  it('keeps a number set part-way through a nested list', () => {
+    const d = blankDoc();
+    d.replace('a'); d.toggleList('number');
+    d.insertParagraph(); d.replace('a1'); d.changeListLevel(1);
+    d.insertParagraph(); d.replace('a2');
+    d.insertParagraph(); d.replace('a3'); d.restartNumbering(5);
+    d.insertParagraph(); d.replace('b'); d.changeListLevel(-1);
+    expect(documentPlainText(d)).toBe('1.\ta\n  1.1.\ta1\n  1.2.\ta2\n  1.5.\ta3\n2.\tb\n');
+    expect(body(documentHtml(d))).toContain('<li value="5">a3</li>');
+    const markdown = documentMarkdown(d);
+    expect([...markdownHtml(markdown).matchAll(/<ol(?: start="(\d+)")?>/g)].map(m => m[1] ?? '1')).toEqual(['1', '1', '5']);
+  });
+});
+
+describe('a list in a table cell', () => {
+  it('keeps its numbers and bullets in Markdown, as in plain text', () => {
+    const d = blankDoc();
+    d.replace('x');
+    d.insertTable(1, 2);
+    d.replace('Step one'); d.toggleList('number'); d.insertParagraph(); d.replace('Step two');
+    d.selectCell(d.tables[0].rows[0].cells[1].id); d.replace('Point'); d.toggleList('bullet');
+    expect(documentPlainText(d)).toContain('1.\tStep one 2.\tStep two\t•\tPoint');
+    expect(documentMarkdown(d)).toContain('| 1. Step one<br>2. Step two | • Point |');
+  });
+});

@@ -6,6 +6,7 @@ import { DocxPackage, createDocx, WRITING_STYLES } from '../src/engine/docx.js';
 import { TextDocument, paragraph, paragraphText } from '../src/engine/model.js';
 import { tableCells, verticalMerges, rowGrid, documentBlocks } from '../src/engine/tables.js';
 import * as T from '../src/engine/table-editing.js';
+import { insertQuickTable } from '../src/engine/quick-tables.js';
 import { blockFor, ownerPlacements } from '../src/engine/table-selection.js';
 import { StorySession } from '../src/engine/story-session.js';
 
@@ -104,6 +105,39 @@ describe('rows and columns', () => {
     valid(doc);
   });
 
+  it('acts on the chosen column or row of Select Column / Select Row beside merged cells, not on the whole table', () => {
+    // A title row merged across the table: Select Column on the third column covers the whole table as a block.
+    const select = (doc, kind, r, c) => { at(doc, r, c); const b = T.selectionBlock(doc); doc.setCellBlock(blockFor(b.table, b, kind)); };
+    let { doc } = tableDocument();
+    block(doc, 0, 0, 0, 3); T.mergeBlock(doc);
+    select(doc, 'column', 1, 2);
+    T.deleteColumns(doc);
+    expect(shape(doc)).toEqual(['a0/a1/a2:2', 'b0 b1', 'c0 c1']);
+    doc.undo();
+    select(doc, 'column', 1, 2);
+    T.insertColumns(doc, { widths: [3000, 3000, 3000] });
+    expect(shape(doc)).toEqual(['a0/a1/a2:3 ', 'b0 b1 b2 ', 'c0 c1 c2 ']);
+    doc.undo();
+    select(doc, 'column', 1, 2);
+    T.setSelectedColumnWidth(doc, 1440, { widths: [3000, 3000, 3000] });
+    expect(doc.tables[0].grid).toEqual([3000, 3000, 1440]);
+    // A first column merged down three rows: Select Row on the second row.
+    ({ doc } = tableDocument(4, 2));
+    block(doc, 1, 0, 3, 1); T.mergeBlock(doc);
+    select(doc, 'row', 2, 1);
+    T.deleteRows(doc);
+    expect(shape(doc)).toEqual(['a0 a1', 'b0/c0/d0^ b1', 'v d1']);
+    doc.undo();
+    select(doc, 'row', 2, 1);
+    T.insertRows(doc, {});
+    expect(shape(doc)).toEqual(['a0 a1', 'b0/c0/d0^ b1', 'v c1', 'v ', 'v d1']);
+    doc.undo();
+    select(doc, 'row', 2, 1);
+    T.setSelectedRowHeight(doc, 720);
+    expect(doc.tables[0].rows.map(r => r.minHeight || 0)).toEqual([0, 0, 720, 0]);
+    valid(doc);
+  });
+
   it('keeps a vertical merge’s content when its first row is deleted', () => {
     const { doc } = tableDocument();
     block(doc, 0, 0, 1, 1); T.mergeBlock(doc);
@@ -111,6 +145,40 @@ describe('rows and columns', () => {
     at(doc, 0, 1); T.deleteRows(doc);
     expect(shape(doc)).toEqual(['a0/b0 b1 b2', 'c0 c1 c2']);
     valid(doc);
+  });
+});
+
+describe('with Track Changes on', () => {
+  // Removing rows, columns, cells or a whole table, merging, sorting and converting to text are not
+  // recorded as tracked changes; they refuse to run rather than remove text a reviewer would never see.
+  const tracked = () => { const { doc } = tableDocument(); doc.trackChanges = true; doc.revisionAuthor = 'Reviewer'; return doc; };
+  const refuses = (name, run) => {
+    const doc = tracked(), before = shape(doc), text = doc.text;
+    expect(() => run(doc), name).toThrow(/Track Changes/);
+    expect(shape(doc), name).toEqual(before);
+    expect(doc.text, name).toBe(text);
+  };
+  it('refuses the commands that would remove table text untracked, and leaves the table as it was', () => {
+    refuses('Delete Rows', doc => { at(doc, 1, 1); T.deleteRows(doc); });
+    refuses('Delete Columns', doc => { at(doc, 1, 1); T.deleteColumns(doc); });
+    refuses('Delete Table', doc => { at(doc, 1, 1); T.deleteTable(doc); });
+    refuses('Delete Cells', doc => { at(doc, 1, 1); T.deleteCells(doc, { shift: 'left' }); });
+    refuses('Merge Cells', doc => { block(doc, 0, 0, 1, 2); T.mergeBlock(doc); });
+    refuses('Sort', doc => { at(doc, 0, 0); T.sortTable(doc, { keys: [{ column: 0, type: 'text', descending: true }] }); });
+    refuses('Convert to Text', doc => { at(doc, 0, 0); T.convertTableToText(doc, { separator: 'tab' }); });
+    refuses('Eraser', doc => { const t = doc.tables[0]; T.eraseLine(doc, { tableId: t.id, cellIds: [t.rows[0].cells[0].id, t.rows[0].cells[1].id] }); });
+    refuses('Delete row (Table actions)', doc => { at(doc, 1, 1); doc.deleteTablePart('row'); });
+  });
+  it('still records the Delete key on cells, and allows commands that remove nothing', () => {
+    const doc = tracked();
+    block(doc, 0, 0, 0, 2); expect(T.clearCells(doc)).toBe(true);
+    expect(doc.paragraphs.some(p => p.runs.some(r => r.revision?.type === 'del'))).toBe(true);
+    at(doc, 1, 1); expect(T.insertRows(doc, {})).toBe(true);
+    expect(doc.tables[0].rows).toHaveLength(4);
+    // A Quick Table merges cells of the table it has just inserted: that still works.
+    doc.select(doc.text.length);
+    expect(insertQuickTable(doc, 'calendar', (r, c) => doc.insertTable(r, c), { date: new Date(2024, 1, 1) })).toBe(true);
+    expect(doc.tables.at(-1).rows[0].cells).toHaveLength(1);
   });
 });
 
@@ -237,6 +305,38 @@ describe('table commands', () => {
     expect(T.sortDate('3/4/2024')).toBe(Date.UTC(2024, 2, 4));
   });
 
+  it('sorts cells by the text they keep once tracked changes are accepted', () => {
+    const { doc } = tableDocument(3, 1);
+    const fill = (r, text) => { at(doc, r, 0); const p = doc.paragraphs.find(x => x.cellId === cellAt(doc, r, 0).id), s = doc.paragraphOffset(doc.paragraphs.indexOf(p)); doc.select(s, s + paragraphText(p).length); doc.replace(text); };
+    fill(0, 'cherry'); fill(1, 'banana'); fill(2, 'date');
+    // A reviewer replaces "date" with "apple": "date" stays as a tracked deletion.
+    doc.trackChanges = true; doc.revisionAuthor = 'Reviewer';
+    fill(2, 'apple');
+    doc.trackChanges = false;
+    at(doc, 0, 0);
+    T.sortTable(doc, { keys: [{ column: 0, type: 'text' }] });
+    expect(shape(doc)).toEqual(['dateapple', 'banana', 'cherry']);
+  });
+
+  it('does not sort rows when a comment or bookmark runs from one sorted row into another', () => {
+    const { doc } = tableDocument(3, 1);
+    const fill = (r, text) => { at(doc, r, 0); const p = doc.paragraphs.find(x => x.cellId === cellAt(doc, r, 0).id), s = doc.paragraphOffset(doc.paragraphs.indexOf(p)); doc.select(s, s + paragraphText(p).length); doc.replace(text); };
+    fill(0, 'cherry'); fill(1, 'banana'); fill(2, 'apple');
+    const s = doc.text.indexOf('cherry') + 2, e = doc.text.indexOf('banana') + 3;
+    doc.addComment({ author: 'x', text: 'note', range: [s, e] });
+    at(doc, 0, 0);
+    expect(() => T.sortTable(doc, { keys: [{ column: 0, type: 'text' }] })).toThrow(/comment/);
+    expect(shape(doc)).toEqual(['cherry', 'banana', 'apple']);
+    // A range within one row moves with it.
+    const { doc: other } = tableDocument(3, 1);
+    const set = (r, text) => { at(other, r, 0); const p = other.paragraphs.find(x => x.cellId === cellAt(other, r, 0).id), st = other.paragraphOffset(other.paragraphs.indexOf(p)); other.select(st, st + paragraphText(p).length); other.replace(text); };
+    set(0, 'cherry'); set(1, 'banana'); set(2, 'apple');
+    other.addComment({ author: 'x', text: 'note', range: [other.text.indexOf('banana'), other.text.indexOf('banana') + 3] });
+    at(other, 0, 0);
+    expect(T.sortTable(other, { keys: [{ column: 0, type: 'text' }] })).toBe(true);
+    expect(shape(other)).toEqual(['apple', 'banana', 'cherry']);
+  });
+
   it('sorting a repeated header row into the body without "Header row" leaves the repeat on the top row', async () => {
     const { pkg, doc } = tableDocument(3, 1);
     const fill = (r, text) => { at(doc, r, 0); doc.select(doc.selection.focus, doc.selection.focus + 2); doc.replace(text); };
@@ -255,6 +355,30 @@ describe('table commands', () => {
     expect(doc.tables[0].rows.map(row => !!row.header)).toEqual([true, false, false]);
   });
 
+  it('keeps a paragraph between tables when text right after a table is converted, or a table is moved under another', async () => {
+    const { pkg, doc } = tableDocument(2, 2);
+    // The paragraph after the table: "x<Tab>y" becomes a second table, after an empty paragraph.
+    doc.select(doc.text.length); doc.replace('x\ty');
+    doc.select(doc.text.lastIndexOf('x'), doc.text.length);
+    T.convertTextToTable(doc, { separator: 'tab' });
+    expect(documentBlocks(doc.paragraphs, doc.tables).map(b => b.type)).toEqual(['table', 'paragraph', 'table', 'paragraph']);
+    const { xml, reopened } = await roundTrip(pkg, doc);
+    expect(xml).not.toMatch(/<\/w:tbl><w:tbl>/);
+    expect(reopened.tables).toHaveLength(2);
+    doc.undo();
+    expect(doc.tables).toHaveLength(1);
+    // A third table dropped on the paragraph right after the first.
+    const { doc: two } = tableDocument(2, 2, ['Top']);
+    two.select(0); two.insertTable(1, 1, 9000);
+    expect(documentBlocks(two.paragraphs, two.tables).map(b => b.type)).toEqual(['table', 'paragraph', 'table', 'paragraph']);
+    const [first, second] = [two.tables.find(t => t.rows.length === 1), two.tables.find(t => t.rows.length === 2)];
+    const after = two.paragraphs.at(-1);
+    expect(T.moveTable(two, first.id, after.id)).toBe(true);
+    expect(documentBlocks(two.paragraphs, two.tables).map(b => b.type)).toEqual(['paragraph', 'table', 'paragraph', 'table', 'paragraph']);
+    expect(two.tables.indexOf(second)).toBeGreaterThanOrEqual(0);
+    valid(two);
+  });
+
   it('converts text to a table and back', async () => {
     const pkg = createDocx([paragraph('Name\tQty'), paragraph('Pens\t2'), paragraph('Ink\t1\textra'), paragraph('After')], undefined, undefined, undefined, [], {}, WRITING_STYLES);
     const doc = open(pkg);
@@ -268,6 +392,17 @@ describe('table commands', () => {
     T.convertTableToText(doc, { separator: 'comma' });
     expect(doc.tables).toHaveLength(0);
     expect(doc.paragraphs.map(paragraphText)).toEqual(['Name,Qty,', 'Pens,2,', 'Ink,1,extra', 'After']);
+  });
+
+  it('converts a table with cells merged down to text with the columns still lined up', () => {
+    const { doc } = tableDocument();
+    block(doc, 0, 0, 1, 1); T.mergeBlock(doc);
+    expect(shape(doc)).toEqual(['a0/b0^ a1 a2', 'v b1 b2', 'c0 c1 c2']);
+    at(doc, 0, 1); T.convertTableToText(doc, { separator: 'tab' });
+    expect(doc.paragraphs.map(paragraphText).slice(0, 3)).toEqual(['a0\vb0\ta1\ta2', '\tb1\tb2', 'c0\tc1\tc2']);
+    // And back: the same three columns.
+    doc.select(0, doc.text.indexOf('c2') + 2);
+    expect(T.textTableShape(doc, { separator: 'tab' })).toEqual({ rows: 3, columns: 3 });
   });
 
   it('converts text inside a cell into a nested table', async () => {

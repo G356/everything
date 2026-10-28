@@ -382,8 +382,11 @@ function element(n) {
 
 /** Office Math markup for linear-format input; display wraps it in m:oMathPara. */
 export function linearToOmml(input, { display = false } = {}) {
-  const ns = `xmlns:m="${MATH}" xmlns:w="${W}"`, body = omml(parseLinearMath(input).body);
-  return display ? `<m:oMathPara ${ns}><m:oMath>${body}</m:oMath></m:oMathPara>` : `<m:oMath ${ns}>${body}</m:oMath>`;
+  const ns = `xmlns:m="${MATH}" xmlns:w="${W}"`;
+  if (!display) return `<m:oMath ${ns}>${omml(parseLinearMath(input).body)}</m:oMath>`;
+  // A displayed equation may have several lines (§22.1.2.78 oMathPara): one m:oMath for each line typed.
+  const lines = String(input).split(/\r?\n/).filter(line => line.trim());
+  return `<m:oMathPara ${ns}>${(lines.length ? lines : ['']).map(line => `<m:oMath>${omml(parseLinearMath(line).body)}</m:oMath>`).join('')}</m:oMathPara>`;
 }
 
 /** Linear text for existing Office Math markup, to edit it in the input box. */
@@ -472,7 +475,8 @@ function fractionPart(node) {
 // The base of a script or mark: one operand the script attaches to.
 function base(node) {
   const items = editableItems(node);
-  if (items.length === 1 && (items[0].kind === 'run' && singleChar(items[0].text) || ['d', 'acc', 'bar'].includes(items[0].kind) && !/^\w+\(/.test(items[0].text))) return items[0].text;
+  // A quoted plain-text run ("x") is one operand too.
+  if (items.length === 1 && (items[0].kind === 'run' && singleChar(items[0].text) || items[0].kind === 'plain' || ['d', 'acc', 'bar'].includes(items[0].kind) && !/^\w+\(/.test(items[0].text))) return items[0].text;
   return bracket(editableSequence(node));
 }
 // Structures nested more deeply than Office Math's depth limit (each spans two or more elements)
@@ -486,7 +490,7 @@ function editableNode(node) {
 function editableStructure(node) {
   const e = mathChild(node, 'e');
   switch (node.localName) {
-    case 'oMathPara': return mathKids(node, 'oMath').map(editableNode).join(' ');
+    case 'oMathPara': return mathKids(node, 'oMath').map(editableNode).join(LINE_BREAK);
     case 'oMath': return editableSequence(node);
     case 'f': return `${fractionPart(mathChild(node, 'num'))}${mathVal(mathChild(node, 'fPr'), 'type') === 'noBar' ? '¦' : '/'}${fractionPart(mathChild(node, 'den'))}`;
     case 'sSup': return `${base(e)}^${scriptArgument(mathChild(node, 'sup'))}`;
@@ -515,8 +519,12 @@ function editableStructure(node) {
         fname = `${FUNCS.has(word) ? word : `\\operatorname{${word}}`}${mathChild(only, 'sub') ? `_${scriptArgument(mathChild(only, 'sub'))}` : ''}${mathChild(only, 'sup') ? `^${scriptArgument(mathChild(only, 'sup'))}` : ''}`;
       } else { const word = runText(name); fname = FUNCS.has(word) ? word : `\\operatorname{${word}}`; }
       // The argument is the terms up to the next space or operator, or one bracketed group.
-      const items = editableItems(e), simple = items.length && items.every(item => item.kind === 'run' || ['sSup', 'sSub', 'sSubSup', 'acc', 'bar'].includes(item.kind)) && items.length === 1 || items.length > 1 && items.every(item => item.kind === 'run');
-      const argument = items.length === 1 && items[0].kind === 'd' ? items[0].text : simple ? items.map(item => item.text).join('') : bracket(editableSequence(e));
+      // Unbracketed, the parser takes terms up to a space or operator and stops after a bracketed group, so
+      // runs may lead up to one last term: a run, script, accent or bar, a bracketed group ("f(x)") or a
+      // nested function ("sin x" in "lim sin x"), which takes the rest itself.
+      const items = editableItems(e), last = items.at(-1);
+      const simple = items.length && items.slice(0, -1).every(item => item.kind === 'run') && (['run', 'sSup', 'sSub', 'sSubSup', 'acc', 'bar', 'd'].includes(last.kind) || last.kind === 'func' && items.length === 1);
+      const argument = simple ? items.map(item => item.text).join('') : bracket(editableSequence(e));
       return `${fname} ${argument}`;
     }
     case 'acc': {
@@ -539,9 +547,11 @@ function editableStructure(node) {
 }
 
 /** Linear text for existing Office Math markup that builds the same equation again when typed back. */
+// Lines of a displayed equation, kept apart from the line breaks inside its text (which read as spaces).
+const LINE_BREAK = '\u2028';
 export function ommlToEditableLinear(xml) {
   const root = editableRoot(xml);
-  return root ? editableNode(root).replace(/[\r\n]+/g, ' ').trim() : '';
+  return root ? editableNode(root).replace(/[\r\n]+/g, ' ').split(LINE_BREAK).map(line => line.trim()).filter(Boolean).join('\n') : '';
 }
 
 export const EQUATION_GALLERY = [

@@ -70,13 +70,20 @@ test('keeps search results current during document editing, undo and composition
   await input.dispatchEvent('keydown', { key: 'f', ctrlKey: true, keyCode: 229 }); await expect(panel(page)).toBeHidden();
 });
 
-test('repaginates replacements in flowing cells and atomically rolls back an oversized repeated header', async ({ page }) => {
+test('repaginates replacements in flowing cells and lays out a header grown too tall to repeat once', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
   const input = await fixture(page), original = await input.inputValue(), pages = await page.locator('canvas.canvas-page').count(); await open(page, input); await query(page).fill('Flowing');
   await replacement(page).fill('Many more flowing words that fill the cell'); await panel(page).getByRole('button', { name: 'Replace all', exact: true }).click(); expect(await page.locator('canvas.canvas-page').count()).toBeGreaterThan(pages);
   await undo(page).click(); await expect(input).toHaveValue(original); expect(await page.locator('canvas.canvas-page').count()).toBe(pages); await expect(undo(page)).toBeDisabled();
-  await query(page).fill('needle header'); await replacement(page).fill('Huge repeated header '.repeat(200)); await panel(page).getByRole('button', { name: 'Replace all', exact: true }).click();
-  await expect(panel(page).getByRole('alert')).toContainText(/header|height|fit/i); await expect(input).toHaveValue(original); expect(await page.locator('canvas.canvas-page').count()).toBe(pages); await expect(undo(page)).toBeDisabled(); await expect(redo(page)).toBeEnabled();
+  // A repeated header that no longer leaves its page room for the table body is not repeated: the
+  // replacement is applied, the header row flows once across pages, and one undo restores everything.
+  const huge = 'Huge repeated header '.repeat(200);
+  await query(page).fill('needle header'); await replacement(page).fill(huge); await panel(page).getByRole('button', { name: 'Replace all', exact: true }).click();
+  await expect(input).toHaveValue(original.replace('needle header', huge)); await expect(panel(page).getByRole('alert')).toBeHidden();
+  await expect.poll(() => page.locator('canvas.canvas-page').count()).toBeGreaterThan(pages); await expect(undo(page)).toBeEnabled(); await expect(redo(page)).toBeDisabled();
+  await undo(page).click(); await expect(input).toHaveValue(original); await expect.poll(() => page.locator('canvas.canvas-page').count()).toBe(pages); await expect(undo(page)).toBeDisabled(); await expect(redo(page)).toBeEnabled();
   await replacement(page).fill('Small header'); await panel(page).getByRole('button', { name: 'Replace all', exact: true }).click(); await expect(panel(page).getByRole('alert')).toBeHidden(); await expect(input).toHaveValue(original.replace('needle header', 'Small header'));
+  expect(errors).toEqual([]);
 });
 
 test('keeps search controls reachable on a narrow screen and preserves history for a no-op replacement', async ({ page }, info) => {
@@ -178,4 +185,43 @@ test('tints every match while searching, leaves the current one in the selection
   await query(page).fill('needle'); await expect.poll(tinted).toBeGreaterThan(0);
   await input.press('ControlOrMeta+End'); await page.keyboard.insertText(' needle'); await expect(count(page)).toHaveText('4 matches'); await expect.poll(tinted).toBeGreaterThan(two * 1.4);
   await close(page); await expect.poll(tinted).toBe(0); await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeEnabled();
+});
+
+test('searches and replaces in the main document while a footer is being edited', async ({ page }) => {
+  await page.goto('/mock.html#/new');
+  await expect(page.getByRole('button', { name: 'Bold', exact: true })).toBeEnabled();
+  await page.getByLabel('Open DOCX file').setInputFiles('tests/fixtures/page-stories/footer-variants.docx');
+  const body = page.getByRole('textbox', { name: 'Document text' });
+  await expect(body).toHaveValue('Body page 1\nBody page 2\nBody page 3');
+  const story = () => page.evaluate(() => window.__docs.current.view.engine.session.path);
+  const editFooter = async () => { await page.evaluate(() => window.__docs.current.view.engine.editStory('word/footer-first.xml', 0)); await expect.poll(story).toBe('word/footer-first.xml'); };
+  await editFooter();
+  // The Navigation pane lists the body's matches, and a result goes to the body.
+  await page.getByRole('textbox', { name: 'Footer text' }).press('ControlOrMeta+f');
+  const search = page.getByRole('searchbox', { name: 'Search document' });
+  await search.fill('page');
+  const results = page.getByRole('list', { name: 'Search results' }).getByRole('button');
+  await expect(results).toHaveCount(3);
+  await results.nth(1).click();
+  await expect.poll(story).toBe(null);
+  expect(await body.evaluate(el => el.value.slice(el.selectionStart, el.selectionEnd) + '@' + el.selectionStart)).toBe('page@17');
+  // Find and Replace in the main document, started from the footer.
+  await editFooter();
+  await page.getByRole('textbox', { name: 'Footer text' }).press(REPLACE_CHORD);
+  await query(page).fill('Body');
+  // The first match is selected, in the body.
+  await expect(count(page)).toHaveText('1 of 3');
+  await expect.poll(story).toBe(null);
+  await editFooter();
+  await expect(count(page)).toHaveText('3 matches');
+  await replacement(page).fill('Main');
+  await panel(page).getByRole('button', { name: 'Replace all', exact: true }).click();
+  await expect(body).toHaveValue('Main page 1\nMain page 2\nMain page 3');
+  expect(await page.evaluate(() => window.__docs.current.view.engine.pageStories.stories['word/footer-first.xml'].paragraphs.map(p => p.runs.map(r => r.text).join('')).join('\n'))).toBe('First \ufffc');
+  // Find Next (Shift+F4) goes on with the Navigation pane's search, in the body.
+  await close(page);
+  await editFooter();
+  await page.getByRole('textbox', { name: 'Footer text' }).press('Shift+F4');
+  await expect.poll(story).toBe(null);
+  expect(await body.evaluate(el => el.value.slice(el.selectionStart, el.selectionEnd))).toBe('page');
 });

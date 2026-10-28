@@ -1,4 +1,4 @@
-import { paragraphText, paragraphFormat } from './model.js';
+import { paragraphText, paragraphFormat, locate } from './model.js';
 import { runFormat } from './formatting.js';
 import { listKind } from './numbering.js';
 import { HIGHLIGHTS } from './backgrounds.js';
@@ -17,23 +17,36 @@ export const FRAGMENT_ATTRIBUTE = 'data-documents-fragment';
 const RUN_KEYS = ['bold', 'italic', 'underlineStyle', 'strikethrough', 'color', 'highlight', 'fontSize', 'fontAscii', 'verticalAlign', 'capitalization'];
 const MAX_RUNS = 2000;
 
-/** Whether this document's content can be copied or pasted with formatting. */
-export function carriesFormatting(model) {
-  return !(model.hasContentControls || model.hasBodyFields || model.hasBlockControls || model.hasNoteMarks || model.hasPlainTextControls || model.hasMacroButtons);
-}
+const plainRun = run => !run.image && !run.math && !run.vml && !run.bodySymbol && !run.noteMark && !run.contentControl && !run.field && !/[\u000e￼]/.test(run.text);
+// A paragraph a formatted paste can go into: no field, note, content control or object anywhere in it.
+const plainParagraph = p => !p.blockControls?.length && !p.fieldMarkers?.length && p.runs.every(plainRun);
 
-const plainRun = run => !run.image && !run.math && !run.bodySymbol && !run.noteMark && !run.contentControl && !run.field && !/[\u000e￼]/.test(run.text);
+/**
+ * Whether a paste at the selection (or `range`) can take formatting. The commands that reapply it work on the
+ * pasted text by offsets, which fields, notes and content controls in the paragraphs it goes into could shift;
+ * those paragraphs take plain text. Elsewhere in a document that has them, formatting is pasted as usual.
+ */
+export function carriesFormatting(model, [start, end] = model.range) {
+  if (!(model.hasContentControls || model.hasBodyFields || model.hasBlockControls || model.hasNoteMarks || model.hasPlainTextControls || model.hasMacroButtons)) return true;
+  const first = locate(model.paragraphs, start).index, last = locate(model.paragraphs, end).index;
+  for (let i = first; i <= last; i++) if (!plainParagraph(model.paragraphs[i])) return false;
+  return true;
+}
 
 /** The selection as paragraphs of formatted runs, or null when it holds more than text. */
 export function copyFragment(model) {
   const [start, end] = model.range;
-  if (start === end || !carriesFormatting(model)) return null;
-  const paragraphs = []; let at = 0, runCount = 0;
+  // What the selection holds decides (each run is checked below); fields or notes elsewhere do not.
+  if (start === end) return null;
+  const paragraphs = []; let at = 0, runCount = 0, cell = null;
   for (const p of model.paragraphs) {
     const length = paragraphText(p).length, from = at, to = at + length;
     at = to + 1;
     if (to < start || from > end) continue;
-    if (p.cellId) return null;
+    // Text within one table cell copies as the paragraphs it is; across cells, or into or out of a table, the
+    // selection holds table structure the fragment cannot carry.
+    if (!paragraphs.length) cell = p.cellId || null;
+    else if ((p.cellId || null) !== cell) return null;
     const runs = []; let offset = from;
     for (const run of p.runs) {
       const a = Math.max(start, offset), b = Math.min(end, offset + run.text.length);
@@ -89,7 +102,7 @@ export function fragmentHtml(fragment) {
     const heading = /^Heading([1-6])$/.exec(p.styleId || '')?.[1] || (p.styleId === 'Title' ? '1' : null);
     const tag = kind ? 'li' : heading ? `h${heading}` : 'p';
     // Tabs and runs of spaces are the text's own, which HTML collapses into one space unless told otherwise.
-    const align = p.alignment && p.alignment !== 'left' ? `;text-align:${p.alignment === 'both' ? 'justify' : p.alignment}` : '';
+    const align = p.alignment && p.alignment !== 'left' ? `;text-align:${p.alignment === 'both' ? 'justify' : p.alignment === 'distribute' ? 'justify;text-align-last:justify' : p.alignment}` : '';
     html += `<${tag} style="white-space:pre-wrap${align}">${p.runs.map(runHtml).join('') || '<br>'}</${tag}>`;
   }
   if (openList) html += `</${openList}>`;
@@ -152,6 +165,8 @@ export function htmlPicture(html) {
 /* ---------- HTML from this editor or another application ---------- */
 
 const BLOCKS = new Set(['P', 'DIV', 'CENTER', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'BLOCKQUOTE', 'PRE', 'TR', 'TABLE', 'UL', 'OL', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'ASIDE', 'NAV', 'MAIN', 'ADDRESS', 'FIGURE', 'FIGCAPTION', 'DL', 'DT', 'DD', 'HR', 'TBODY', 'THEAD', 'TFOOT', 'BODY']);
+/** Blocks in a table cell that keep their own lines: lists, and the rows of a table nested in it. */
+const CELL_STRUCTURE = new Set(['LI', 'UL', 'OL', 'TABLE', 'TBODY', 'THEAD', 'TFOOT', 'TR', 'DL', 'HR']);
 const SKIPPED = new Set(['SCRIPT', 'STYLE', 'HEAD', 'TITLE', 'META', 'LINK', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'IMG', 'VIDEO', 'AUDIO', 'CANVAS', 'IFRAME', 'OBJECT', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA']);
 const NAMED_COLORS = { black: '000000', white: 'FFFFFF', red: 'FF0000', green: '008000', blue: '0000FF', yellow: 'FFFF00', gray: '808080', grey: '808080', orange: 'FFA500', purple: '800080' };
 
@@ -173,8 +188,13 @@ function inherited(el, format) {
   if (tag === 'S' || tag === 'STRIKE' || tag === 'DEL') next.strikethrough = 'single';
   if (tag === 'SUP') next.verticalAlign = 'superscript';
   if (tag === 'SUB') next.verticalAlign = 'subscript';
-  if (s.fontWeight) next.bold = s.fontWeight === 'bold' || s.fontWeight === 'bolder' || Number(s.fontWeight) >= 600;
-  if (s.fontStyle) next.italic = s.fontStyle === 'italic' || s.fontStyle === 'oblique';
+  // A weight or style the element inherits (inherit, unset: both inherited properties) is its parent's, as a reset
+  // style sheet's "font: inherit" makes a span inside bold text say.
+  const own = value => value && !/^(inherit|unset)$/i.test(value);
+  if (own(s.fontWeight)) next.bold = s.fontWeight === 'bold' || s.fontWeight === 'bolder' || Number(s.fontWeight) >= 600;
+  else if (s.fontWeight) next.bold = format.bold;
+  if (own(s.fontStyle)) next.italic = s.fontStyle === 'italic' || s.fontStyle === 'oblique';
+  else if (s.fontStyle) next.italic = format.italic;
   const decoration = `${s.textDecorationLine || ''} ${s.textDecoration || ''}`;
   if (/underline/.test(decoration)) next.underlineStyle = 'single';
   if (/line-through/.test(decoration)) next.strikethrough = 'single';
@@ -199,6 +219,7 @@ function wordListItem(el) {
 
 function fromForeignHtml(body) {
   const paragraphs = [];
+  let lists = 0;
   let current = null;
   const start = (props = {}) => { current = { text: '', runs: [], mark: true, styleId: null, styleName: null, alignment: null, list: null, ...props }; paragraphs.push(current); };
   const append = (text, format, link, pre = false) => {
@@ -241,7 +262,11 @@ function fromForeignHtml(body) {
     if (tag === 'BR') { if (!node.classList?.contains('Apple-interchange-newline')) append('\v', format, context.link); return; }
     const next = inherited(node, format);
     const ctx = { ...context };
-    if (tag === 'A' && /^(https?:|mailto:|tel:)/i.test(node.getAttribute('href') || '')) ctx.link = node.getAttribute('href');
+    if (tag === 'A') {
+      // A browser follows an address with the spaces and line breaks around it (and tabs and line breaks in it) left out.
+      const href = (node.getAttribute('href') || '').replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '').replace(/[\t\n\r]/g, '');
+      if (/^(https?:|mailto:|tel:)/i.test(href)) ctx.link = href;
+    }
     // Word writes a tab as no-break spaces styled mso-tab-count, and a run of spaces as no-break spaces styled
     // mso-spacerun, so a browser shows their width: they are a tab and ordinary spaces.
     const declared = node.getAttribute?.('style') || '', tabs = /mso-tab-count\s*:\s*(\d+)/i.exec(declared)?.[1];
@@ -257,14 +282,26 @@ function fromForeignHtml(body) {
     // cells of a table centered by its container (as Word writes one) keep their own alignment.
     const align = node.style?.textAlign || (tag !== 'TABLE' && node.getAttribute('align')) || (tag === 'CENTER' && 'center');
     if (align || tag === 'TABLE') ctx.align = { center: 'center', right: 'right', justify: 'both' }[align && align.toLowerCase()] || null;
-    if (tag === 'UL' || tag === 'OL') ctx.list = { kind: tag === 'UL' ? 'bullet' : 'number', level: context.list ? Math.min(8, context.list.level + 1) : 0 };
-    if ((tag === 'TD' || tag === 'TH') && current?.text && !/\t$/.test(current.text)) {
-      const last = current.runs.at(-1); last.text = last.text.replace(/ +$/, ''); current.text = current.text.replace(/ +$/, '');
+    // Each list is told apart (`id`) so its items number on past paragraphs and lists inside them, and a list right
+    // after another starts again; an ordered list keeps the number it starts at.
+    if (tag === 'UL' || tag === 'OL') {
+      const start = tag === 'OL' ? Number.parseInt(node.getAttribute('start') ?? '', 10) : NaN;
+      ctx.list = { kind: tag === 'UL' ? 'bullet' : 'number', level: context.list ? Math.min(8, context.list.level + 1) : 0, id: ++lists, ...(Number.isSafeInteger(start) && start >= 0 && start <= 32767 ? { start } : {}) };
+    }
+    // Every cell after a row's first starts after a tab, an empty one included, so the cells after it stay in their columns.
+    if ((tag === 'TD' || tag === 'TH') && current && /^T[DH]$/.test(node.previousElementSibling?.tagName || '')) {
+      const last = current.runs.at(-1);
+      if (last) { last.text = last.text.replace(/ +$/, ''); current.text = current.text.replace(/ +$/, ''); }
       append('\t', format, null);
     }
     // A list item's own paragraph wrapper (as some producers write) is the item, not another paragraph.
     const wrapper = (tag === 'P' || tag === 'DIV') && current?.list && !current.text && context.item === current;
-    const block = BLOCKS.has(tag) && !wrapper;
+    // A table row is one paragraph, its cells apart by tabs: the paragraphs Word, LibreOffice and Google Docs write in
+    // every cell are text of the row, one after another, not paragraphs of their own.
+    if (tag === 'TD' || tag === 'TH') ctx.cell = true;
+    const cellBlock = context.cell && current && BLOCKS.has(tag) && !CELL_STRUCTURE.has(tag);
+    if (cellBlock && current.text && !/[\t ]$/.test(current.text)) append(' ', format, null);
+    const block = BLOCKS.has(tag) && !wrapper && !cellBlock;
     if (block) {
       end();
       if (!['UL', 'OL', 'TABLE', 'TBODY', 'THEAD', 'TFOOT', 'DL', 'BODY'].includes(tag)) {
@@ -273,6 +310,8 @@ function fromForeignHtml(body) {
       }
     }
     if (tag === 'LI') ctx.item = current;
+    // A horizontal rule is an empty paragraph with a line under it, as Word draws one (and makes of "---").
+    if (tag === 'HR' && current) { current.rule = true; current.filled = true; }
     for (const child of node.childNodes) walk(child, next, ctx);
     if (block) end();
   };
@@ -294,11 +333,15 @@ function fromForeignHtml(body) {
   return { paragraphs, foreign: true };
 }
 
-/** The fragment an HTML clipboard item holds, from this editor or converted from another application. */
-export function htmlFragment(html) {
+/**
+ * The fragment an HTML clipboard item holds, from this editor or converted from another application. `copied`: the
+ * HTML may be this editor's own copy, whose description of what was copied stands for it; a file opened or inserted
+ * is read as it is, whatever description it holds.
+ */
+export function htmlFragment(html, { copied = true } = {}) {
   if (typeof DOMParser === 'undefined' || !html) return null;
   const doc = new DOMParser().parseFromString(html, 'text/html');
-  const own = doc.querySelector(`[${FRAGMENT_ATTRIBUTE}]`);
+  const own = copied && doc.querySelector(`[${FRAGMENT_ATTRIBUTE}]`);
   if (own) {
     try {
       const fragment = JSON.parse(own.getAttribute(FRAGMENT_ATTRIBUTE));
@@ -320,11 +363,30 @@ function styleFor(model, p) {
   return Object.values(definitions).find(s => s.type === 'paragraph' && !s.error && String(s.name || '').toLowerCase() === name)?.id || null;
 }
 
-function applyParagraph(model, p, foreign) {
+/**
+ * The item of a list another application wrote (`p.list.id`): it goes on in the list its earlier items went into here,
+ * though a paragraph or another list came between, and the first item of a list starts it again at its number when
+ * the list goes on from one pasted before it, or starts at another number. `lists`: each list's numbering so far.
+ */
+function continueList(model, p, lists) {
+  const target = model.selectedParagraphs[0];
+  if (!target?.list || p.list?.id == null) return;
+  const known = lists.get(p.list.id);
+  if (known != null) {
+    if (target.list.numId !== known) { target.list = { ...target.list, numId: known, direct: true }; target.listChanged = true; }
+    return;
+  }
+  const joined = [...lists.values()].includes(target.list.numId);
+  if (p.list.kind === 'number' && (joined || (p.list.start ?? 1) !== 1)) attempt(() => model.restartNumbering(p.list.start ?? 1));
+  lists.set(p.list.id, model.selectedParagraphs[0].list?.numId);
+}
+
+function applyParagraph(model, p, foreign, lists = new Map()) {
   const style = styleFor(model, p);
   if (style) attempt(() => model.setParagraphStyle(style));
   else if (!foreign && p.styleId === null) attempt(() => model.setParagraphStyle(''));
   if (p.alignment && model.paragraphFormatting.alignment !== p.alignment) attempt(() => model.setParagraphFormat({ alignment: p.alignment }));
+  if (p.rule === true) attempt(() => model.setParagraphFormat({ paragraphBorders: { bottom: { style: 'single', size: 6, space: 1, color: 'auto' } } }));
   const current = model.listFormatting;
   if (p.list) {
     if (current !== p.list.kind) {
@@ -332,6 +394,7 @@ function applyParagraph(model, p, foreign) {
       attempt(() => model.toggleList(p.list.kind));
     }
     for (let i = 0; i < 8 && model.selectedParagraphs[0]?.list && model.selectedParagraphs[0].list.level < p.list.level; i++) attempt(() => model.changeListLevel(1));
+    continueList(model, p, lists);
   } else if (current === 'bullet' || current === 'number') attempt(() => model.toggleList(current));
 }
 
@@ -391,8 +454,9 @@ export function formattedPasteFits(fragment) {
 function applyFragment(model, fragment, start) {
   const after = start + fragment.paragraphs.reduce((n, p) => n + p.text.length + 1, -1);
   let at = start;
+  const lists = new Map();
   for (const p of fragment.paragraphs) {
-    if (p.mark) { model.select(at); applyParagraph(model, p, !!fragment.foreign); }
+    if (p.mark) { model.select(at); applyParagraph(model, p, !!fragment.foreign, lists); }
     let offset = at;
     const applied = new Set(appliedRuns(fragment, p));
     for (const run of p.runs) { if (applied.has(run)) applyRun(model, offset, offset + run.text.length, run, !!fragment.foreign); offset += run.text.length; }

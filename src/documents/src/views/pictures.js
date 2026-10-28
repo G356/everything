@@ -13,7 +13,7 @@ import { toast } from '../ui/toast.js';
 import { engineApi } from '../lib/engine-api.js';
 import { drawShapeThumbnail } from '../ui/shape-controls.js';
 import { galleryItems } from './insert-gallery.js';
-import { formatDrawing, drawingKind, drawingParts } from '../engine/drawing-format.js';
+import { formatDrawing, formatDrawings, drawingKind, drawingParts, currentDrawingXml } from '../engine/drawing-format.js';
 import { describeDrawing, setFill, setOutline, setEffects, set3d, setGeometry, setTransform, setBlipEffects, setCrop, setBodyProperties, setDocProperties, writeFrame, readFrame, themeColors,
   child, childrenOf, A, WP, R } from '../engine/drawing-xml.js';
 import { frameOf, offsetsFor, moveDrawings, alignmentMoves, POSITION_PRESETS, presetPosition } from '../engine/drawing-arrange.js';
@@ -48,12 +48,12 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
   const ready = () => { const engine = editor(); return engine && !pkg()?.readOnly && !engine.readOnly ? engine : null; };
   const selected = () => ready()?.model.selectedImage || null;
   const described = new WeakMap();
-  /** What the selected drawing looks like, read from its XML (cached per drawing object). */
+  /** What the selected drawing looks like, read from its XML as it would be saved now (cached per drawing object). */
   const describe = image => {
     if (!image) return null;
     if (!described.has(image)) {
       let value = null;
-      try { value = image.shell ? describeDrawing(image.shell) : { kind: 'picture', name: image.name, description: image.alt, frame: image.anchor ? null : { inline: true }, blip: { luminance: null, grayscale: false, duotone: null, biLevel: null, colorChange: null, alpha: image.opacity ?? 1, layer: null }, effects: { shadow: null, glow: null, softEdge: null, reflection: null }, outline: undefined, geometry: { preset: 'rect' }, transform: { rotation: (image.rotation || 0) / 60000, flipH: !!image.flipH, flipV: !!image.flipV }, threeD: { camera: null, bevel: null }, crop: image.crop || {} }; } catch { value = null; }
+      try { value = image.shell ? describeDrawing(currentDrawingXml(editor()?.shapePackage?.(), editor()?.model, image)) : { kind: 'picture', name: image.name, description: image.alt, frame: image.anchor ? null : { inline: true }, blip: { luminance: null, grayscale: false, duotone: null, biLevel: null, colorChange: null, alpha: image.opacity ?? 1, layer: null }, effects: { shadow: null, glow: null, softEdge: null, reflection: null }, outline: undefined, geometry: { preset: 'rect' }, transform: { rotation: (image.rotation || 0) / 60000, flipH: !!image.flipH, flipV: !!image.flipV }, threeD: { camera: null, bevel: null }, crop: image.crop || {} }; } catch { value = null; }
       described.set(image, value);
     }
     return described.get(image);
@@ -96,6 +96,22 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
         if (ok) { onChange(); refreshPanes(); }
         return ok;
       } catch (e) { fail(friendly(e, label)); return false; }
+    };
+    const result = queue.then(run, run);
+    queue = result.catch(() => {});
+    return result;
+  }
+  /** The same edit on several drawings, as one undo step; resolves to how many changed (0 when it failed). */
+  function applyAll(label, targets, edit) {
+    const ids = targets.map(image => image.id);
+    const run = async () => {
+      const engine = ready(); if (!engine || !ids.length) return 0;
+      const all = runImages(engine.model), current = ids.map(id => all.find(i => i.id === id)).filter(Boolean);
+      try {
+        const count = await formatDrawings(engine, current, edit, { label });
+        if (count) { onChange(); refreshPanes(); }
+        return count;
+      } catch (e) { fail(friendly(e, label)); return 0; }
     };
     const result = queue.then(run, run);
     queue = result.catch(() => {});
@@ -147,6 +163,8 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
     altText: ({ description, title, decorative }, image) => apply('Alt Text', async drawing => { const { docPr } = drawingParts(drawing); setDocProperties(docPr, { description, title, decorative }); }, image ?? selected()),
     rename: (image, name) => apply('Rename', async drawing => { setDocProperties(drawingParts(drawing).docPr, { name }); }, image),
     setHidden: (image, hidden) => apply(hidden ? 'Hide' : 'Show', async drawing => { const { docPr } = drawingParts(drawing); if (hidden) docPr.setAttribute('hidden', '1'); else docPr.removeAttribute('hidden'); }, image),
+    /** Hide All / Show All: every listed drawing in one step. */
+    setHiddenAll: (images, hidden) => applyAll(hidden ? 'Hide All' : 'Show All', images.filter(image => !!image.hidden !== hidden), async drawing => { const { docPr } = drawingParts(drawing); if (hidden) docPr.setAttribute('hidden', '1'); else docPr.removeAttribute('hidden'); }),
     rotate: (degrees, label = 'Rotate') => rotateBy(degrees, label),
     flip: axis => flip(axis),
     resetPicture: (size = false) => apply(size ? 'Reset Picture & Size' : 'Reset Picture', async drawing => {
@@ -352,13 +370,11 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
     openCompressDialog({ selectedOnly: isPicture(selected()), onApply: async ({ ppi, deleteCropped, selectedOnly }) => {
       const engine = ready(); if (!engine) return;
       const targets = selectedOnly ? [selected()] : runImages(engine.model).filter(isPicture);
-      let count = 0;
-      for (const image of targets) {
-        const current = runImages(engine.model).find(i => i.id === image.id) || image;
-        try { if (await formatDrawing(engine, current, compressEdit({ ppi, deleteCropped }), { label: 'Compress' })) count++; } catch (e) { fail(friendly(e, 'Compress Pictures')); break; }
-      }
+      // Every picture in one step: one Undo restores them all, and a failure leaves none compressed.
+      let count;
+      try { count = await formatDrawings(engine, targets, compressEdit({ ppi, deleteCropped }), { label: 'Compress' }); } catch (e) { fail(friendly(e, 'Compress Pictures')); return; }
       toast(count ? `Compressed ${count} ${count === 1 ? 'picture' : 'pictures'}.` : 'The pictures are already at that resolution.');
-      onChange();
+      onChange(); refreshPanes();
     } });
   }
   const pictureInput = el('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml', hidden: true, 'aria-label': 'Change picture file', onchange: async () => {
@@ -394,11 +410,12 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
       const point = pictureFraction(frame.getBoundingClientRect(), image, e.clientX, e.clientY);
       if (!point) { done(); return; }
       e.preventDefault(); e.stopPropagation();
-      const crop = image.crop || {};
-      const { u, v } = point;
+      // The flip mirrors the cropped picture: mirror the point within what shows, then map it through the crop.
+      const shown = engine.cropInfo?.(image) || { crop: image.crop || {}, flipH: !!image.flipH, flipV: !!image.flipV }, crop = shown.crop || {};
+      const u = shown.flipH ? 1 - point.u : point.u, v = shown.flipV ? 1 - point.v : point.v;
       const sx = ((crop.left || 0) + u * (100000 - (crop.left || 0) - (crop.right || 0))) / 100000, sy = ((crop.top || 0) + v * (100000 - (crop.top || 0) - (crop.bottom || 0))) / 100000;
-      const probe = new OffscreenCanvas(1, 1).getContext('2d');
-      probe.drawImage(source, Math.floor((image.flipH ? 1 - sx : sx) * source.width), Math.floor((image.flipV ? 1 - sy : sy) * source.height), 1, 1, 0, 0, 1, 1);
+      const probe = new OffscreenCanvas(1, 1).getContext('2d'), pixel = (fraction, size) => Math.max(0, Math.min(size - 1, Math.floor(fraction * size)));
+      probe.drawImage(source, pixel(sx, source.width), pixel(sy, source.height), 1, 1, 0, 0, 1, 1);
       const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
       const rgb = [r, g, b].map(c => c.toString(16).padStart(2, '0')).join('').toUpperCase();
       done();

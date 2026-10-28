@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import nspell from 'nspell';
-import { wordsToCheck, rankSuggestions } from '../src/lib/spelling.js';
+import { wordsToCheck, rankSuggestions, apostropheSuggestions } from '../src/lib/spelling.js';
 
 describe('words to check', () => {
   const words = text => wordsToCheck(text).map(w => w.word);
@@ -24,6 +24,19 @@ describe('words to check', () => {
     // Replacing the located word leaves the possessive ending in place.
     const m = wordsToCheck(text).find(w => w.word === 'recieve');
     expect(text.slice(0, m.wordStart) + 'receive' + text.slice(m.wordEnd)).toBe('I saw receive’s notice and don’t care.');
+  });
+  it('checks words without their optional hyphens and zero-width characters, and locates them whole', () => {
+    const text = 'Manual hyph\u00adenation and zero\u200bwidth te\u200dst, rec\u00adieve\u00ad’s notice';
+    const list = wordsToCheck(text);
+    expect(list.map(w => w.word)).toEqual(['Manual', 'hyphenation', 'and', 'zero', 'width', 'test', 'recieve', 'notice']);
+    // A correction replaces the word with its optional hyphen, and keeps the possessive ending.
+    const hyphenated = list.find(w => w.word === 'hyphenation');
+    expect(text.slice(hyphenated.start, hyphenated.end)).toBe('hyph\u00adenation');
+    const possessive = list.find(w => w.word === 'recieve');
+    expect(text.slice(possessive.wordStart, possessive.wordEnd)).toBe('rec\u00adieve');
+    expect(text.slice(0, possessive.wordStart) + 'receive' + text.slice(possessive.wordEnd)).toBe('Manual hyph\u00adenation and zero\u200bwidth te\u200dst, receive\u00ad’s notice');
+    const speller = nspell(readFileSync('public/dictionaries/en-US.aff', 'utf8'), readFileSync('public/dictionaries/en-US.dic', 'utf8'));
+    expect(list.filter(w => !speller.correct(w.word)).map(w => w.word)).toEqual(['recieve']);
   });
   it('checks the parts of a hyphenated compound and reports their positions', () => {
     const list = wordsToCheck('a well-knwn fact');
@@ -50,5 +63,16 @@ describe('suggestions', () => {
     const wrong = wordsToCheck('Teh quick brown fox jumpd over the lazy dog. It’s well-known.').filter(w => !speller.correct(w.word)).map(w => w.word);
     expect(wrong).toEqual(['Teh', 'jumpd']);
     expect(rankSuggestions('jumpd', speller.suggest('jumpd'))[0]).toBe('jumped');
+  });
+  it('offers a contraction first for a word missing its apostrophe', () => {
+    const speller = nspell(readFileSync('public/dictionaries/en-US.aff', 'utf8'), readFileSync('public/dictionaries/en-US.dic', 'utf8'));
+    const suggest = word => rankSuggestions(word, [...apostropheSuggestions(word, w => speller.correct(w)), ...speller.suggest(word)]);
+    expect(suggest('dont')[0]).toBe("don't");
+    expect(suggest('wasnt')[0]).toBe("wasn't");
+    expect(suggest('youre')[0]).toBe("you're");
+    expect(suggest('im')[0]).toBe("I'm");
+    expect(suggest('Doesnt')[0]).toBe("Doesn't");
+    expect(suggest('teh')[0]).toBe('the');
+    expect(apostropheSuggestions("don't", w => speller.correct(w))).toEqual([]);
   });
 });

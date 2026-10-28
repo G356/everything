@@ -85,12 +85,40 @@ test('uses native shaping for expanded spaces, matches paint widths and keeps zo
 
 test('previews unsupported justification as read-only with the original available', async ({ page }) => {
   const input = await fixture(page), text = await input.inputValue();
-  for (const [from, to, error] of [['<w:jc w:val="both"/>', '<w:jc w:val="distribute"/>', /distribute paragraph alignment/], ['Direct both ', 'Direct both العربية ', /kashida/], ['w:pos="1800" w:val="left"', 'w:pos="1800" w:val="center"', /justification after/]]) {
+  for (const [from, to, error] of [['<w:jc w:val="both"/>', '<w:jc w:val="thaiDistribute"/>', /thaiDistribute paragraph alignment/]]) {
     const parts = unzipSync(readFileSync('public/fixtures/justification.docx')), xml = strFromU8(parts['word/document.xml']); expect(xml).toContain(from); parts['word/document.xml'] = strToU8(xml.replace(from, to));
     await openReadOnlyPreview(page, { name: 'unsupported-justification.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: Buffer.from(zipSync(parts)) });   await expect(page.getByRole('button', { name: 'Download .docx', exact: true })).toBeEnabled();
   }
   await fixture(page);
-  await choose(input, 'Direct both'); await page.keyboard.insertText('العربية '); await expect(page.getByText(/kashida/)).toBeVisible(); await expect(input).toHaveValue(text);   await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeDisabled();
+});
+
+// A justified line whose last tab is a center, right or decimal stop keeps its natural spacing, and the
+// document opens for editing (before, it opened read-only).
+test('opens justified paragraphs with a center tab for editing', async ({ page }) => {
+  await page.goto('/playground.html'); await showAllTools(page);
+  const input = page.getByRole('textbox', { name: 'Document text' }); await expect(input).toHaveValue(/^A small beginning/);
+  const parts = unzipSync(readFileSync('public/fixtures/justification.docx')), xml = strFromU8(parts['word/document.xml']);
+  expect(xml).toContain('w:pos="1800" w:val="left"'); parts['word/document.xml'] = strToU8(xml.replace('w:pos="1800" w:val="left"', 'w:pos="1800" w:val="center"'));
+  await page.getByLabel('Open DOCX file').setInputFiles({ name: 'center-tab.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: Buffer.from(zipSync(parts)) });
+  await expect(input).toHaveValue(/^Justified paragraphs/); await expect(input).toHaveJSProperty('readOnly', false);
+  await expect(page.locator('#playground-error')).toBeEmpty();
+});
+
+// Arabic typed into a justified paragraph is accepted and justified by its word spaces (no kashida).
+test('justifies typed Arabic by its word spaces with native canvas metrics', async ({ page }) => {
+  const input = await fixture(page), text = await input.inputValue();
+  await choose(input, 'Direct both'); await page.keyboard.insertText('العربية '); await expect(input).toHaveValue(text.replace('Direct both', 'العربية Direct both'));
+  await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeEnabled(); await expect(page.getByText(/kashida/)).toHaveCount(0);
+  const edges = await page.evaluate(async () => {
+    const { measureCanvasText } = await import('/src/engine/canvas-text.js'), { layoutDocument } = await import('/src/engine/layout.js'), { paragraph } = await import('/src/engine/model.js');
+    const ctx = document.createElement('canvas').getContext('2d'), measure = (t, s) => measureCanvasText(ctx, t, s);
+    const arabic = 'هذا نص عربي طويل يلتف عبر عدة أسطر للتأكد من أن التخطيط يعمل بشكل صحيح في المحرر مع English words أيضا';
+    const layout = layoutDocument([paragraph(arabic, { format: { spaceAfter: 0, alignment: 'both' } })], measure, { width: 300, height: 4000, margin: 20 });
+    // Ink extents: the reordered right-to-left text spans the whole measure; the hanging space is clipped at its edge.
+    return layout.lines.map(l => ({ last: l.paragraphEnd, spacing: l.justificationSpacing, left: Math.min(...l.fragments.filter(f => f.text.trim()).map(f => f.x)), right: Math.max(...l.fragments.filter(f => f.text.trim()).map(f => f.x + f.width)) }));
+  });
+  expect(edges.length).toBeGreaterThan(2);
+  for (const line of edges.filter(l => !l.last)) { expect(line.spacing).toBeGreaterThan(0); expect(Math.abs(line.left - 20)).toBeLessThan(0.5); expect(Math.abs(line.right - 280)).toBeLessThan(0.5); }
 });
 
 test('previews justified documents when Canvas word spacing is unavailable', async ({ page }) => {
@@ -117,4 +145,25 @@ test('fits justified rich text into fractional-width table cells using native fo
     return failures;
   });
   expect(failures).toEqual([]);
+});
+
+// Distributed alignment (§17.18.44 distribute): every line, the last one included, spans the measure,
+// by equal gaps between all characters, measured and painted with native letter spacing.
+test('opens distributed paragraphs for editing and spreads every line with native canvas metrics', async ({ page }) => {
+  await page.goto('/playground.html'); await showAllTools(page);
+  const input = page.getByRole('textbox', { name: 'Document text' }); await expect(input).toHaveValue(/^A small beginning/);
+  const parts = unzipSync(readFileSync('public/fixtures/justification.docx')), xml = strFromU8(parts['word/document.xml']);
+  parts['word/document.xml'] = strToU8(xml.replaceAll('<w:jc w:val="both"/>', '<w:jc w:val="distribute"/>'));
+  await page.getByLabel('Open DOCX file').setInputFiles({ name: 'distributed.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: Buffer.from(zipSync(parts)) });
+  await expect(input).toHaveValue(/^Justified paragraphs/); await expect(input).toHaveJSProperty('readOnly', false);
+  await choose(input, 'Direct both'); await page.keyboard.insertText('Typed '); await expect(input).toHaveValue(/Typed Direct both/);
+  const lines = await page.evaluate(async () => {
+    const { measureCanvasText } = await import('/src/engine/canvas-text.js'), { layoutDocument } = await import('/src/engine/layout.js'), { paragraph } = await import('/src/engine/model.js');
+    const ctx = document.createElement('canvas').getContext('2d'), measure = (t, s) => measureCanvasText(ctx, t, s);
+    const layout = layoutDocument(['Distributed title', 'Alpha beta gamma delta epsilon zeta eta theta iota kappa', '分散对齐的中文段落最后一行也要对齐'].map(t => paragraph(t, { format: { spaceAfter: 0, alignment: 'distribute' } })), measure, { width: 300, height: 4000, margin: 20 });
+    // A line of one character has no gap to widen.
+    return layout.lines.filter(l => l.end - l.start > 1).map(l => ({ left: Math.min(...l.stops.map(s => s.x)), right: Math.max(...l.stops.map(s => s.x)) - (l.hangingRight ? 0 : l.ignoredTrailingWidth) }));
+  });
+  expect(lines.length).toBeGreaterThan(3);
+  for (const line of lines) { expect(Math.abs(line.left - 20)).toBeLessThan(0.5); expect(Math.abs(line.right - 280)).toBeLessThan(0.5); }
 });

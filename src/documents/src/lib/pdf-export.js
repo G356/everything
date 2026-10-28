@@ -6,8 +6,13 @@
  * and whose ToUnicode map returns the original characters.
  */
 
+import { selectionRects } from '../engine/layout.js';
+import { bidiEmbeddingLevels, bidiMirroredCharacter, bidiVisualOrder } from '../engine/bidi-text.js';
+
 const encoder = new TextEncoder();
 const PT_PER_PX = 0.75;
+/** Link targets a PDF reader may follow, as the web page export writes them. */
+const SAFE_LINK = /^(https?:|mailto:|tel:)/i;
 
 /** UTF-16BE hex for a PDF hex string. */
 export function utf16Hex(text) {
@@ -35,12 +40,30 @@ function codeHex(text, astral) {
   return hex.toUpperCase();
 }
 
+const graphemes = text => (typeof Intl?.Segmenter === 'function' ? [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)].map(s => s.segment) : text.match(/\P{M}\p{M}*|\p{M}+/gu) || []);
+const STRONG_RTL = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]|\ud802[\udc00-\udfff]|\ud803[\udc00-\ude7f]|\ud83a[\udc00-\udfff]/;
+
+/**
+ * A run's text in the order its glyphs stand on the page, left to right, as a PDF holds them: readers put
+ * right-to-left text back in reading order. A run the layout gave a direction (`rtl`) is painted in it throughout;
+ * one without is painted in the paragraph's left-to-right order, with any right-to-left words in it reversed by the
+ * bidirectional algorithm. Each letter keeps its marks, and a bracket in right-to-left text its mirrored form.
+ */
+export function visualText(text, rtl = false) {
+  if (!rtl && !STRONG_RTL.test(text)) return text;
+  const levels = rtl ? null : bidiEmbeddingLevels(text, 'ltr');
+  let at = 0;
+  const clusters = graphemes(text).map(segment => { const level = rtl ? 1 : levels[at]; at += segment.length; return { segment, level }; });
+  return bidiVisualOrder(clusters, c => c.level).map(c => (c.level % 2 ? c.segment.replace(/^./u, ch => bidiMirroredCharacter(ch)) : c.segment)).join('');
+}
+
 /** Text-layer operators for one page: lines of [{ text, x, baseline, width, fontSize }] in page pixels. */
 export function textLayer(fragments, pageHeightPx, astral = new Map()) {
   const ops = ['BT', '3 Tr'];
   for (const f of fragments) {
-    const text = f.text.replace(/[\u0000-\u001f￼­]/g, ' ');
+    let text = f.text.replace(/[\u0000-\u001f￼­]/g, ' ');
     if (!text.trim()) continue;
+    text = visualText(text, !!f.rtl);
     const size = Math.max(1, f.fontSize || 12), width = Math.max(1, f.width * PT_PER_PX);
     // Each code advances half an em in the text font; horizontal scaling fits the run's painted width.
     const scale = Math.max(1, Math.min(10000, width / ([...text].length * size * 0.5) * 100));
@@ -100,13 +123,21 @@ export function buildPdf(pages, { title = 'Document', author = '' } = {}) {
   define(cidFont, `<< /Type /Font /Subtype /CIDFontType2 /BaseFont /DocumentsTextLayer /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor ${descriptor} 0 R /DW 500 /CIDToGIDMap /Identity >>`);
   define(font, `<< /Type /Font /Subtype /Type0 /BaseFont /DocumentsTextLayer /Encoding /Identity-H /DescendantFonts [${cidFont} 0 R] /ToUnicode ${toUnicode} 0 R >>`);
   const kids = [];
+  // A link's address is a 7-bit string (§12.6.4.7): characters beyond ASCII, spaces and controls are percent-encoded.
+  const uri = target => `(${String(target).replace(/[^\x21-\x7e]/gu, ch => encodeURIComponent(ch)).replace(/[\\()]/g, m => '\\' + m)})`;
   for (const page of pages) {
     const pageId = reserve(), image = reserve(), content = reserve();
     kids.push(pageId);
     const w = page.widthPx * PT_PER_PX, h = page.heightPx * PT_PER_PX;
+    // Each linked area is a link annotation (§12.5.6.5) with a URI action, without a border of its own.
+    const annots = (page.links || []).map(link => {
+      const id = reserve(), pt = n => (n * PT_PER_PX).toFixed(2);
+      define(id, `<< /Type /Annot /Subtype /Link /Rect [${pt(link.x)} ${pt(page.heightPx - link.y - link.height)} ${pt(link.x + link.width)} ${pt(page.heightPx - link.y)}] /Border [0 0 0] /A << /S /URI /URI ${uri(link.target)} >> >>`);
+      return id;
+    });
     define(image, { dict: `/Type /XObject /Subtype /Image /Width ${page.imageWidth} /Height ${page.imageHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode`, stream: page.jpeg });
     define(content, { stream: encoder.encode(`q ${w.toFixed(2)} 0 0 ${h.toFixed(2)} 0 0 cm /Im1 Do Q\n${textLayer(page.fragments, page.heightPx, astral)}`) });
-    define(pageId, `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${w.toFixed(2)} ${h.toFixed(2)}] /Resources << /XObject << /Im1 ${image} 0 R >> /Font << /F1 ${font} 0 R >> >> /Contents ${content} 0 R >>`);
+    define(pageId, `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${w.toFixed(2)} ${h.toFixed(2)}] /Resources << /XObject << /Im1 ${image} 0 R >> /Font << /F1 ${font} 0 R >> >> /Contents ${content} 0 R${annots.length ? ` /Annots [${annots.map(id => `${id} 0 R`).join(' ')}]` : ''} >>`);
   }
   // Written once every page's text has met its characters beyond the BMP.
   define(toUnicode, { stream: encoder.encode(toUnicodeMap(astral)) });
@@ -137,7 +168,36 @@ export function pageFragments(lines, page) {
   const out = [];
   for (const line of lines) {
     if (line.page !== page || line.virtual || line.cellText) continue;
-    for (const f of line.fragments || []) if (f.text && !f.image) out.push({ text: f.text, x: f.x, baseline: line.baseline, width: f.width, fontSize: f.fontSize });
+    // A list item's number or bullet is painted apart from its text, and is read with it: "1. First step".
+    const marker = line.marker;
+    if (marker?.text && marker.width > 0) out.push({ text: marker.text, x: marker.x, baseline: line.baseline, width: marker.width, fontSize: marker.fontSize });
+    for (const f of line.fragments || []) if (f.text && !f.image) out.push({ text: f.text, x: f.x, baseline: line.baseline, width: f.width, fontSize: f.fontSize, ...(f.bidiDirection === 'rtl' ? { rtl: true } : {}) });
+  }
+  return out;
+}
+
+/**
+ * The areas of the page where a web, mail or phone link's text is laid out: [{ page, x, y, width, height, target }]
+ * in page pixels, one per line (or picture) the link covers. Links within the document (to a bookmark) are left out.
+ */
+export function pageLinks(paragraphs, layout) {
+  const ranges = [];
+  let at = 0;
+  for (const p of paragraphs) {
+    for (const run of p.runs) {
+      const length = String(run.text || '').length, target = run.link?.target;
+      if (typeof target === 'string' && SAFE_LINK.test(target) && !run.vanish) {
+        const last = ranges.at(-1);
+        if (last?.target === target && last.end === at) last.end += length;
+        else ranges.push({ start: at, end: at + length, target });
+      }
+      at += length;
+    }
+    at++;
+  }
+  const out = [];
+  for (const { start, end, target } of ranges) {
+    for (const r of selectionRects(layout, start, end)) if (r.width > 0 && r.height > 0) out.push({ page: r.page ?? 0, x: r.x, y: r.y, width: r.width, height: r.height, target });
   }
   return out;
 }
@@ -152,9 +212,11 @@ export async function exportPdf(engine, { title } = {}) {
   const { layout, storyLayout } = engine.printedLayout || engine;
   const lines = [...layout.lines, ...(layout.repeatedLines || []), ...(storyLayout?.lines || [])];
   const pages = [];
+  let links = [];
+  try { links = pageLinks(engine.model.paragraphs, layout); } catch (e) { console.warn('[documents] the PDF\'s links could not be placed', e); }
   for (const [index, canvas] of sheets.entries()) {
     const geometry = layout.pages[index] || layout.page;
-    pages.push({ widthPx: geometry.width, heightPx: geometry.height, jpeg: await jpegOf(canvas), imageWidth: canvas.width, imageHeight: canvas.height, fragments: pageFragments(lines, index) });
+    pages.push({ widthPx: geometry.width, heightPx: geometry.height, jpeg: await jpegOf(canvas), imageWidth: canvas.width, imageHeight: canvas.height, fragments: pageFragments(lines, index), links: links.filter(link => link.page === index) });
   }
   return new Blob([buildPdf(pages, { title })], { type: 'application/pdf' });
 }

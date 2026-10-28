@@ -39,8 +39,9 @@ export function bodyFieldInstruction(instruction) {
   }
   let address,anchor,tooltip='',frame,bookmark;
   for(let i=1;i<tokens.length;i++){
-    const token=tokens[i];
-    if(!token.startsWith('\\')&&address===undefined){address=token;continue;}
+    // A quoted argument is never a switch, though a UNC path ("\\\\server\\share") starts with a backslash.
+    const token=tokens[i],quoted=instruction[args[i].start]==='"';
+    if((quoted||!token.startsWith('\\'))&&address===undefined){address=token;continue;}
     if(['\\l','\\o','\\t','\\*'].includes(token)){
       const value=tokens[++i];if(value===undefined||value.startsWith('\\'))fail('a missing HYPERLINK switch argument');
       if(token==='\\l'){anchor=value;bookmark=bookmarkArgument(i);}else if(token==='\\o')tooltip=value;else if(token==='\\t')frame=value;
@@ -48,7 +49,15 @@ export function bodyFieldInstruction(instruction) {
   }
   if(address!==undefined&&anchor!==undefined)fail('a HYPERLINK field combining an external address and bookmark');
   if(address===undefined&&anchor===undefined)fail('a HYPERLINK field without a destination');
-  let destination;try{destination=checkedHyperlinkDestination(address===undefined?{anchor:anchor||null}:address);}catch(e){fail(e.message);}
+  // The read-only notice lists what the document contains, so it names the link rather than repeating the link dialog's advice.
+  let destination;try{destination=checkedHyperlinkDestination(address===undefined?{anchor:anchor||null}:address);}catch{
+    if(address===undefined)fail('a HYPERLINK field to an invalid bookmark name');
+    // A file, relative or UNC path is kept as written, like a w:hyperlink relationship target (docx-hyperlinks.js):
+    // shown as a link, never followed from the editor. Script and data addresses still keep the document read-only.
+    if(/^\s*(?:javascript|vbscript|data)\s*:/i.test(address))fail('a HYPERLINK field to a script or data address');
+    if(!address||/[\u0000-\u001f\u007f\uD800-\uDFFF\uFFFE\uFFFF]/u.test(address))fail('a HYPERLINK field to an invalid address');
+    destination={target:address,retainedTarget:true};
+  }
   return {type,instruction,...bookmark,hyperlink:{...destination,tooltip,...(frame?{frame}:{})}};
 }
 

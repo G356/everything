@@ -19,7 +19,8 @@ export function createNoteCommands(ctx) {
       const notes = await import('../engine/footnotes.js');
       if (engine.session.path !== null) {
         if (notes.isNoteStoryKind(engine.pageStories?.stories[engine.session.path]?.kind)) throw new Error('Notes cannot contain other notes.');
-        engine.editStory(null);
+        // The shortcut pressed in a header or footer used to leave it and put the note wherever the caret was last in the text.
+        throw new Error('Footnotes and endnotes go in the text of the document. Close the header or footer first.');
       }
       const { TextDocument, paragraph } = await import('../engine/model.js');
       const body = engine.session.body, styles = body.styles.definitions || {};
@@ -68,8 +69,9 @@ export function createNoteCommands(ctx) {
     let at;
     if (engine.session.path !== null) {
       const story = engine.pageStories?.stories[engine.session.path];
+      // From a note, step from its reference as from the caret just after it: next is the following note, not this one.
       const own = refs.find(r => r.id === story?.noteId && story?.kind === kind);
-      at = own ? own.position : 0;
+      at = own ? own.position + 1 : 0;
       engine.editStory(null);
     } else at = engine.model.range[direction > 0 ? 1 : 0];
     // The caret rests just after a reference mark; next looks beyond it, previous before it. Both wrap.
@@ -122,6 +124,7 @@ export function createNoteCommands(ctx) {
 
   function applySettings(kind, values) {
     const engine = ready(); if (!engine) return;
+    ctx.unprotected?.('its footnote and endnote settings');
     pkg().setNoteSettings(kind, values);
     const definition = engine.session.definition, key = settingsKey(kind);
     if (definition?.[key]) {
@@ -147,6 +150,17 @@ export function createNoteCommands(ctx) {
     const start = number('Start at', settings[kind].start, { min: 1, max: 32767, oninput: () => remember() });
     const restart = select('Numbering', [], null, () => remember());
     const pending = { footnote: { ...settings.footnote }, endnote: { ...settings.endnote } };
+    // What the document has now: only settings that differ from it are written, so Apply with nothing changed
+    // leaves settings.xml as it was, and a footnote change adds no endnote settings.
+    const applied = { footnote: { ...settings.footnote }, endnote: { ...settings.endnote } };
+    const applyChanged = () => {
+      for (const k of ['footnote', 'endnote']) {
+        const changed = Object.fromEntries(['format', 'start', 'restart', 'position'].filter(key => pending[k][key] !== applied[k][key]).map(key => [key, pending[k][key]]));
+        if (!Object.keys(changed).length) continue;
+        applySettings(k, changed);
+        applied[k] = { ...applied[k], ...changed };
+      }
+    };
     function remember() {
       if (!restart.options.length) return; // Not filled in yet.
       pending[kind] = { ...pending[kind], format: format.value, start: Math.max(1, Math.min(32767, Math.round(Number(start.value)) || 1)), restart: restart.value, position: kind === 'footnote' ? footPosition.value : endPosition.value };
@@ -160,7 +174,7 @@ export function createNoteCommands(ctx) {
     }
     switchKind(kind);
     const convert = el('button.btn.btn-outline', { type: 'button', onclick: () => convertDialog() }, 'Convert…');
-    const apply = el('button.btn.btn-outline', { type: 'button', onclick: () => { if (!dialog.form.reportValidity()) return; remember(); try { for (const k of ['footnote', 'endnote']) applySettings(k, pending[k]); dialog.showError(''); } catch (e) { dialog.showError(e.message); } } }, 'Apply');
+    const apply = el('button.btn.btn-outline', { type: 'button', onclick: () => { if (!dialog.form.reportValidity()) return; remember(); try { applyChanged(); dialog.showError(''); } catch (e) { dialog.showError(e.message); } } }, 'Apply');
     const dialog = openDialog({ title: 'Footnote and Endnote', className: 'ref-notes-dialog', submitLabel: 'Insert', actions: [apply], body: [
       el('fieldset.ref-section', {}, el('legend', {}, 'Location'),
         el('div.ref-location-row', {}, el('label.ed-check', {}, footRadio, 'Footnotes'), footPosition),
@@ -173,7 +187,7 @@ export function createNoteCommands(ctx) {
       el('p.field-hint', {}, 'Changes apply to the whole document.'),
     ], onSubmit: async () => {
       remember();
-      for (const k of ['footnote', 'endnote']) applySettings(k, pending[k]);
+      applyChanged();
       await insertNote(kind, { customMark: custom.value });
     } });
   }

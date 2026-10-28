@@ -344,11 +344,18 @@ export function createFormatArea({ editor, pkg, error, refresh: refreshChrome = 
   const storyParagraphs = (engine, path) => engine.session.models?.get(path)?.paragraphs || engine.pageStories.stories[path].paragraphs;
   const findApi = {
     scopes: () => [['headers', 'Headers and footers']],
-    isCurrentStory: story => editor()?.session.path === story.path,
+    // A match without a story is in the body.
+    isCurrentStory: story => editor()?.session.path === (story ? story.path : null),
     range: () => editor()?.model.range || [0, 0],
     matches(query, options) {
       const engine = editor(); if (!engine) return [];
-      if (options.scope !== 'headers') return engine.model.findMatches(query, options);
+      // The current selection is in the story being edited; the main document is the body, also while a header,
+      // footer or note is being edited.
+      if (options.scope === 'selection') {
+        const found = engine.model.findMatches(query, options), path = engine.session.path;
+        return path === null ? found : found.map(m => ({ ...m, story: { path, page: engine.storyPage } }));
+      }
+      if (options.scope !== 'headers') return engine.session.body.findMatches(query, options);
       const body = engine.session.body || engine.model;
       return searchStories(engine).flatMap(story => findAdvanced(storyParagraphs(engine, story.path), query, { ...options, within: undefined }, { styles: body.styles, numbering: body.numbering }).map(m => ({ ...m, story })));
     },
@@ -361,7 +368,10 @@ export function createFormatArea({ editor, pkg, error, refresh: refreshChrome = 
     highlight(matches) { const engine = editor(); engine?.setFindHighlights(matches.filter(m => (m.story?.path ?? null) === engine.session.path)); },
     replace(query, text, options, all) {
       const engine = editor(); if (!engine) return 0;
-      if (options.scope !== 'headers') return engine.replaceMatches(query, text, options, all);
+      if (options.scope !== 'headers') {
+        if (options.scope !== 'selection' && engine.session.path !== null) engine.editStory(null);
+        return engine.replaceMatches(query, text, options, all);
+      }
       if (!all) return engine.session.path === null ? 0 : engine.replaceMatches(query, text, options, false);
       let total = 0;
       for (const story of searchStories(engine)) {
@@ -381,6 +391,7 @@ export function createFormatArea({ editor, pkg, error, refresh: refreshChrome = 
   };
 
   /* ---- Paste ---- */
+  const CLIPBOARD_CLOSED = 'The clipboard could not be read. Allow clipboard access, or paste with the keyboard.';
   let lastPaste = null, chip = null, original = null;
   async function readClipboard() {
     let text = '', html = '', picture = null;
@@ -409,7 +420,10 @@ export function createFormatArea({ editor, pkg, error, refresh: refreshChrome = 
       pasteWith(engine, mode, data);
       if (engine.session.revision !== before) remember(engine, data, mode);
       engine.focus();
-    } catch (e) { error(e); }
+    } catch (e) {
+      // A browser that keeps the clipboard closed to the page says so in its own technical terms.
+      error(e?.name === 'NotAllowedError' || e?.name === 'SecurityError' ? new Error(CLIPBOARD_CLOSED) : e);
+    }
   }
   function remember(engine, data, mode) {
     lastPaste = { engine, data, mode, revision: engine.session.revision };
@@ -447,7 +461,7 @@ export function createFormatArea({ editor, pkg, error, refresh: refreshChrome = 
     const engine = ready(); if (!engine) return;
     engine.finishComposition();
     let data;
-    try { data = await readClipboard(); } catch (e) { error(new Error('The clipboard could not be read. Allow clipboard access, or paste with the keyboard.')); return; }
+    try { data = await readClipboard(); } catch (e) { error(new Error(CLIPBOARD_CLOSED)); return; }
     const formatted = availablePasteModes(engine.model, data).includes('keep');
     const choices = [
       ...(formatted ? [{ id: 'keep', label: 'HTML format', hint: 'Text with the source’s fonts, styles and lists' }, { id: 'merge', label: 'Formatted text (merged)', hint: 'Bold, italic and underline only, in this document’s formatting' }] : []),

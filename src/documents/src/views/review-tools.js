@@ -64,11 +64,14 @@ export function createReviewTools({ editor, pkg, error, author, review, proofing
   function trackingOptions() {
     const engine = editor(); if (!engine) return;
     const settings = pkg()?.reviewSettings || {};
-    openTrackingOptions({ authors: () => people(), doc: { trackMoves: !settings.doNotTrackMoves, trackFormatting: !settings.doNotTrackFormatting },
+    // While tracking is locked, formatting changes are tracked: the setting is shown on and cannot be changed.
+    const locked = restrict.trackingLocked;
+    openTrackingOptions({ authors: () => people(), doc: { trackMoves: !settings.doNotTrackMoves, trackFormatting: locked || !settings.doNotTrackFormatting, formattingLocked: locked },
       apply: (options, doc) => {
         Object.assign(revisionView.options, options);
         rememberTrackingOptions();
-        if (!pkg()?.readOnly && (doc.trackMoves !== !settings.doNotTrackMoves || doc.trackFormatting !== !settings.doNotTrackFormatting)) setSettings({ doNotTrackMoves: !doc.trackMoves, doNotTrackFormatting: !doc.trackFormatting });
+        const trackFormatting = locked ? !settings.doNotTrackFormatting : doc.trackFormatting;
+        if (!pkg()?.readOnly && (doc.trackMoves !== !settings.doNotTrackMoves || trackFormatting !== !settings.doNotTrackFormatting)) setSettings({ doNotTrackMoves: !doc.trackMoves, doNotTrackFormatting: !trackFormatting });
         applyTrackingSettings(); review.commands.setPaneOrientation(options.paneOrientation); editor()?.relayout(); review.refresh(true); onChange();
       }, onClose: () => queueMicrotask(() => editor()?.focus()) });
   }
@@ -76,7 +79,7 @@ export function createReviewTools({ editor, pkg, error, author, review, proofing
     const engine = editor(); if (!engine) return;
     const settings = pkg()?.reviewSettings || {};
     engine.session.body.trackMoves = !settings.doNotTrackMoves;
-    engine.session.body.trackFormatting = !settings.doNotTrackFormatting;
+    engine.session.body.trackFormatting = restrict.trackingLocked || !settings.doNotTrackFormatting;
     revisionView.options.trackMoves = !settings.doNotTrackMoves;
   }
   async function lockTracking() {
@@ -180,7 +183,8 @@ export function createReviewTools({ editor, pkg, error, author, review, proofing
       { label: 'Translate', icon: 'translate', disabled: !has, items: commands.translateItems() },
       { label: 'Language…', icon: 'language', disabled: !ready(), onSelect: languageDialog },
       { separator: true },
-      { label: 'Word Count…', icon: 'wordCount', shortcut: `${MOD_KEY}+Shift+G`, disabled: !has, onSelect: commands.wordCount },
+      // On a Mac Cmd+Shift+G is Find Previous (editor.js), so Word Count has its chord only elsewhere.
+      { label: 'Word Count…', icon: 'wordCount', shortcut: MOD_KEY === 'Cmd' ? null : 'Ctrl+Shift+G', disabled: !has, onSelect: commands.wordCount },
       { separator: true },
       { label: 'Check Accessibility', icon: 'accessibility', disabled: !has, onSelect: commands.checkAccessibility },
       { separator: true },
@@ -252,7 +256,8 @@ export function createReviewTools({ editor, pkg, error, author, review, proofing
       if (!engine.overlays.includes(editorPane.overlay)) engine.overlays.push(editorPane.overlay);
       applyTrackingSettings();
       const view = docRevisionView();
-      if (view.insDel === false || view.formatting === false) Object.assign(revisionView.options, { showInsDel: view.insDel !== false, showFormatting: view.formatting !== false });
+      // The document's own choices, shown or not: those of the document opened before it would otherwise stay.
+      Object.assign(revisionView.options, { showInsDel: view.insDel !== false, showFormatting: view.formatting !== false });
       restrict.applyGuard();
       // A protected document opens with its permissions in view, as desktop word processors show them.
       const protection = pkg()?.reviewSettings?.protection;
@@ -264,6 +269,8 @@ export function createReviewTools({ editor, pkg, error, author, review, proofing
     selectionChanged() { editorPane.selectionChanged(); translator.selectionChanged(); },
     get trackingLocked() { return restrict.trackingLocked; },
     get protectionEnforced() { return restrict.enforced; },
+    /** The protection in force, or null. */
+    get protection() { return restrict.enforced ? restrict.protection : null; },
     destroy() { keyAbort.abort(); for (const part of [editorPane, thesaurus, accessibility, translator, commentsPane, restrict]) part.destroy(); },
   };
 }

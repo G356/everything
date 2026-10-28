@@ -6,12 +6,13 @@
 // layout and painting simply follow the model.
 import { tableModelInternals as M, paragraph, paragraphText, locate } from './model.js';
 import { tableCells, editableCells, verticalMerges, headerRowCount, tableId, fixedColumnWidths, rowGrid, spanWidth, cellContext, documentBlocks } from './tables.js';
-import { cellBlockPlacements, normalizeCellBlock, blockBetween, ownerPlacements } from './table-selection.js';
+import { cellBlockPlacements, normalizeCellBlock, blockBetween, ownerPlacements, blockRowRange, blockColumnRange } from './table-selection.js';
 import { resolveStyledParagraph } from './styles.js';
 import { repairStructuralBookmarks, normalizeBlockBookmarkScopes } from './bookmarks.js';
 import { mergeCellControls } from './block-controls.js';
 import { MAX_DOCUMENT_CHARACTERS, DOCUMENT_CHARACTER_LIMIT_MESSAGE, xmlAttributeText } from './text-limits.js';
 import { checkedCellAlignment } from './cell-alignment.js';
+import { keptText } from './table-formula.js';
 import { checkedCellBorder, resolveCellBorders } from './cell-borders.js';
 import { resolveCellMargins } from './cell-margins.js';
 
@@ -48,6 +49,15 @@ export function selectionBlock(model) {
     if (match) { const block = blockBetween(item.table, match.cell, item.cell); return block && { ...block, table: item.table }; }
   }
   return null;
+}
+
+/**
+ * Table edits that remove or rearrange text (rows, columns, cells, a whole table, merging, sorting,
+ * converting) are not recorded as tracked changes, so with Track Changes on they refuse to run rather
+ * than change text a reviewer would never see, as sorting paragraphs does. `what` names the command.
+ */
+export function refuseUntracked(model, what) {
+  if (model.trackChanges && !model.trackingInternal) throw new Error(`${what} cannot be tracked yet. Turn off Track Changes to do this.`);
 }
 
 function requireBlock(model) {
@@ -107,7 +117,7 @@ function setGrid(table, widths, { fixed = table.layout !== 'autofit' } = {}) {
 
 /** Insert rows above or below the selected rows: as many as are selected unless `count` says. */
 export function insertRows(model, { above = false, count = null } = {}) {
-  const block = requireBlock(model), table = block.table;
+  const chosen = requireBlock(model), table = chosen.table, block = { ...chosen, ...blockRowRange(chosen) };
   const n = count ?? block.bottom - block.top + 1;
   if (!Number.isInteger(n) || n < 1) throw new Error('Choose how many rows to insert.');
   if (table.rows.length + n > 1000) throw new Error('A table can have up to 1,000 rows.');
@@ -137,7 +147,7 @@ export function insertRows(model, { above = false, count = null } = {}) {
 
 /** Insert columns left or right of the selected columns: as many as are selected unless `count` says. */
 export function insertColumns(model, { left = false, count = null, widths: measured } = {}) {
-  const block = requireBlock(model), table = block.table;
+  const chosen = requireBlock(model), table = chosen.table, block = { ...chosen, ...blockColumnRange(chosen) };
   if (table.rows.some(row => row.gridBefore || row.gridAfter)) throw new Error('Columns cannot be inserted in a table whose rows end unevenly yet.');
   const n = count ?? block.right - block.left;
   if (!Number.isInteger(n) || n < 1) throw new Error('Choose how many columns to insert.');
@@ -180,6 +190,7 @@ export function insertColumns(model, { left = false, count = null, widths: measu
 }
 
 function removeTable(model, table) {
+  refuseUntracked(model, 'Deleting a table');
   const state = M.tableContent(model, table);
   model.checkpoint();
   model.tables = model.tables.filter(t => t.id !== table.id);
@@ -198,7 +209,8 @@ export function deleteTable(model) { return removeTable(model, requireBlock(mode
 
 /** Delete the selected rows; deleting every row deletes the table. */
 export function deleteRows(model) {
-  const block = requireBlock(model), table = block.table;
+  refuseUntracked(model, 'Deleting table rows');
+  const chosen = requireBlock(model), table = chosen.table, block = { ...chosen, ...blockRowRange(chosen) };
   if (block.top === 0 && block.bottom === table.rows.length - 1) return removeTable(model, table);
   const state = M.tableContent(model, table);
   model.checkpoint();
@@ -224,7 +236,8 @@ export function deleteRows(model) {
 
 /** Delete the selected grid columns; deleting every column deletes the table. */
 export function deleteColumns(model, { widths: measured } = {}) {
-  const block = requireBlock(model), table = block.table;
+  refuseUntracked(model, 'Deleting table columns');
+  const chosen = requireBlock(model), table = chosen.table, block = { ...chosen, ...blockColumnRange(chosen) };
   if (block.left === 0 && block.right === table.grid.length) return removeTable(model, table);
   if (table.rows.some(row => row.gridBefore || row.gridAfter)) throw new Error('Columns cannot be deleted from a table whose rows end unevenly yet.');
   const column = block.left, end = block.right, span = end - column;
@@ -270,6 +283,7 @@ function requireUnmerged(table, rows, left, right, message) {
 
 /** Delete Cells: shift the cells to the right of the selection left, or the cells below it up. */
 export function deleteCells(model, { shift = 'left' } = {}) {
+  refuseUntracked(model, 'Deleting table cells');
   const block = requireBlock(model), table = block.table;
   if (shift === 'row') return deleteRows(model);
   if (shift === 'column') return deleteColumns(model);
@@ -390,6 +404,7 @@ export function insertCells(model, { shift = 'down', widths: measured } = {}) {
 
 /** Merge the selected rectangle of cells into one, keeping each non-empty cell's paragraphs. */
 export function mergeBlock(model) {
+  refuseUntracked(model, 'Merging cells');
   const block = requireBlock(model), table = block.table, placements = cellBlockPlacements(table, block);
   if (placements.length < 2) throw new Error('Select two or more cells to merge.');
   requireAligned(table, block);
@@ -568,11 +583,20 @@ export function splitTable(model) {
 /* ---- Sizes ---- */
 
 /** Set the grid of a table to these widths (twips). Cell preferences follow; `layout` may fix the table. */
-export function setColumnWidths(model, table, widths, { layout } = {}) {
+export function setColumnWidths(model, table, widths, { layout, absolute = false } = {}) {
   if (widths.length !== table.grid.length || widths.some(w => !Number.isInteger(w) || w < 1 || w > MAX_WIDTH)) throw new Error('Enter a positive width for each column, up to 22 inches.');
   if (sum(widths) > MAX_WIDTH) throw new Error('The table would be wider than 22 inches.');
+  // Widths the table already has (a size box applying its value again as it loses focus) are no change.
+  const dxa = (value, width) => value?.type === 'dxa' && value.value === width;
+  const unchanged = widths.every((w, i) => w === table.grid[i]) && (!layout || table.layout === layout)
+    && (table.width?.type === 'pct' ? !absolute : dxa(table.width, Math.min(MAX_WIDTH, sum(widths))))
+    && table.rows.every(row => rowGrid(row).every(item => dxa(item.cell.width, spanWidth(widths, item.column, item.span)))
+      && (!row.gridBefore || dxa(row.widthBefore, spanWidth(widths, 0, row.gridBefore))) && (!row.gridAfter || dxa(row.widthAfter, spanWidth(widths, widths.length - row.gridAfter, row.gridAfter))));
+  if (unchanged) return false;
   model.checkpoint();
   if (layout && table.layout !== layout) { table.layout = layout; table.layoutChanged = true; }
+  // `absolute`: a table sized as a share of the window becomes as wide as its columns.
+  if (absolute && table.width?.type === 'pct') { table.width = { type: 'dxa', value: sum(widths) }; table.widthChanged = true; }
   setGrid(table, [...widths], { fixed: true });
   model.didChange(); return true;
 }
@@ -583,27 +607,35 @@ export function setSelectedColumnWidth(model, twips, { widths: measured } = {}) 
   const block = requireBlock(model), table = block.table;
   const widths = columnWidths(model, table, measured);
   const next = [...widths];
-  for (const c of cellsInRow(table.rows[block.top], block.left, block.right)) {
+  // Select Column sets the columns it chose; otherwise each selected cell of the top row takes the width.
+  const cells = block.columns ? [blockColumnRange(block)].map(({ left, right }) => ({ column: left, end: right, span: right - left })) : cellsInRow(table.rows[block.top], block.left, block.right);
+  for (const c of cells) {
     const current = spanWidth(widths, c.column, c.span);
     for (let i = c.column; i < c.end; i++) next[i] = widths[i] * twips / current;
   }
-  return setColumnWidths(model, table, integerWidths(next, Math.round(sum(next))), { layout: 'fixed' });
+  // A table sized as a share of the window would stretch the columns back to fill it: it takes their total.
+  return setColumnWidths(model, table, integerWidths(next, Math.round(sum(next))), { layout: 'fixed', absolute: true });
 }
 
-/** Height spinner and row-border dragging: the rows take this minimum height (twips). */
+/**
+ * Height spinner and row-border dragging: the rows take this height (twips). A `null` rule keeps a row
+ * of exact height exact, as dragging its border or typing its height does; other rows become at least
+ * that tall.
+ */
 export function setRowsHeight(model, rows, twips, rule = 'atLeast') {
   if (!Number.isFinite(twips) || twips < 0 || twips > 31680) throw new Error('Enter a row height up to 22 inches.');
-  if (!['atLeast', 'exact', 'auto'].includes(rule)) throw new Error('Choose at least, exactly or automatic.');
-  const value = rule === 'auto' ? 0 : Math.round(twips);
-  const changed = rows.filter(row => !row.heightExplicit || row.heightRule !== rule || row.minHeight !== value);
+  if (rule !== null && !['atLeast', 'exact', 'auto'].includes(rule)) throw new Error('Choose at least, exactly or automatic.');
+  const ruleOf = row => rule ?? (row.heightExplicit && row.heightRule === 'exact' ? 'exact' : 'atLeast');
+  const valueOf = row => ruleOf(row) === 'auto' ? 0 : Math.round(twips);
+  const changed = rows.filter(row => !row.heightExplicit || row.heightRule !== ruleOf(row) || row.minHeight !== valueOf(row));
   if (!changed.length) return false;
   model.checkpoint();
-  for (const row of changed) Object.assign(row, { heightRule: rule, minHeight: value, heightExplicit: true, heightChanged: true });
+  for (const row of changed) Object.assign(row, { heightRule: ruleOf(row), minHeight: valueOf(row), heightExplicit: true, heightChanged: true });
   model.didChange(); return true;
 }
 export function setSelectedRowHeight(model, twips, rule = 'atLeast') {
-  const block = requireBlock(model);
-  return setRowsHeight(model, block.table.rows.slice(block.top, block.bottom + 1), twips, rule);
+  const block = requireBlock(model), { top, bottom } = blockRowRange(block);
+  return setRowsHeight(model, block.table.rows.slice(top, bottom + 1), twips, rule);
 }
 
 /** Distribute Rows: the selected rows (or every row) share their total height evenly. `heights` are the laid-out row heights in twips. */
@@ -879,6 +911,7 @@ export function sortDate(text) {
  * cannot read sort after the others, in either order.
  */
 export function sortTable(model, { keys, header = false, caseSensitive = false } = {}) {
+  refuseUntracked(model, 'Sorting table rows');
   if (!Array.isArray(keys) || !keys.length || keys.length > 3) throw new Error('Choose one to three sort keys.');
   const block = requireBlock(model), table = block.table;
   let [first, last] = block.bottom > block.top ? [block.top, block.bottom] : [0, table.rows.length - 1];
@@ -889,7 +922,7 @@ export function sortTable(model, { keys, header = false, caseSensitive = false }
   for (const key of keys) if (!Number.isInteger(key.column) || key.column < 0 || key.column >= table.grid.length || !['text', 'number', 'date'].includes(key.type)) throw new Error('Choose a column and type for each sort key.');
   const textOf = (row, column) => {
     const cell = rowGrid(row).find(c => c.column <= column && c.end > column)?.cell;
-    return cell ? model.paragraphs.filter(p => p.cellId === cell.id).map(paragraphText).join(' ').replace(/￼/g, '').trim() : '';
+    return cell ? model.paragraphs.filter(p => p.cellId === cell.id).map(keptText).join(' ').replace(/￼/g, '').trim() : '';
   };
   const collator = new Intl.Collator(undefined, { sensitivity: caseSensitive ? 'case' : 'base', numeric: false });
   const rows = table.rows.slice(first, last + 1).map((row, index) => ({ row, index, values: keys.map(key => {
@@ -907,6 +940,15 @@ export function sortTable(model, { keys, header = false, caseSensitive = false }
   });
   if (sorted.every((item, i) => item.index === i)) return false;
   const state = M.tableContent(model, table);
+  // Reordered, a comment or bookmark from one of these rows into another could end before it starts.
+  const rowOf = new Map(), edges = new Map();
+  rows.forEach(({ row }, i) => { for (const cell of row.cells) for (const p of state.byCell.get(cell.id) || []) rowOf.set(p, i); });
+  for (const [p, i] of rowOf) for (const marker of p.bookmarks || []) {
+    if ((marker.edge !== 'start' && marker.edge !== 'end') || marker.tableBoundary || marker.columnRange || marker.blockScope) continue;
+    if (!edges.has(marker.id)) edges.set(marker.id, {});
+    edges.get(marker.id)[marker.edge] = i;
+  }
+  if ([...edges.values()].some(({ start, end }) => start !== undefined && end !== undefined && start !== end)) throw new Error('A comment or bookmark runs from one of these rows into another, so they cannot be sorted.');
   model.checkpoint();
   table.rows.splice(first, sorted.length, ...sorted.map(item => item.row));
   // Repeating as a header row belongs to the table's top rows: a row sorted into the body stops repeating and
@@ -922,7 +964,7 @@ export function sortTable(model, { keys, header = false, caseSensitive = false }
 
 const SEPARATORS = { tab: '\t', comma: ',', paragraph: null };
 // Run properties that make a run an object or a marked change rather than plain formatted text.
-const OBJECT_RUN_KEYS = ['image', 'math', 'field', 'noteMark', 'contentControl', 'bodySymbol', 'positionalTab', 'noBreakHyphen', 'breakClear', 'revision', 'formatRevision', 'link'];
+const OBJECT_RUN_KEYS = ['image', 'math', 'vml', 'field', 'noteMark', 'contentControl', 'bodySymbol', 'positionalTab', 'noBreakHyphen', 'breakClear', 'revision', 'formatRevision', 'link'];
 function separatorChar(separator, other) {
   if (separator === 'other') { if (typeof other !== 'string' || [...other].length !== 1 || /[\n\v\f]/.test(other)) throw new Error('Type one separator character.'); return other; }
   if (!(separator in SEPARATORS)) throw new Error('Choose how the text is separated.');
@@ -978,8 +1020,28 @@ function applyAutofit(table, autofit) {
   for (const cell of tableCells(table)) cell.width = { type: 'auto', value: 0 };
 }
 
+/**
+ * Whether the paragraph before `index` lies in a table at the level of `parentId` (null: the body), so a
+ * table placed at `index` would touch it: two adjacent `w:tbl` elements read as one table.
+ */
+function tableJustBefore(model, index, parentId) {
+  for (let cellId = model.paragraphs[index - 1]?.cellId || null; cellId && cellId !== parentId;) {
+    const { table } = cellContext(model.tables, cellId);
+    if ((table.parentCellId || null) === parentId) return true;
+    cellId = table.parentCellId;
+  }
+  return false;
+}
+/** An empty paragraph to keep two tables apart, formatted like `source`, in the parent cell if any. */
+function separatorLike(model, source, parentId) {
+  const p = { ...copy(source), id: paragraph().id, runs: [] };
+  for (const key of ['list', 'bookmarks', 'fieldMarkers', 'styleChanged', 'mark', 'sectionEnd']) delete p[key];
+  return resolveStyledParagraph(p, model.styles, model.numbering);
+}
+
 /** Convert Text to Table: the selected paragraphs become rows (or, separated by paragraphs, cells). */
 export function convertTextToTable(model, { separator = 'tab', other, columns = null, autofit = 'fixed', availableWidth } = {}) {
+  refuseUntracked(model, 'Converting text to a table');
   const char = separatorChar(separator, other), sources = model.selectedParagraphs;
   if (!sources.length || sources.every(p => !paragraphText(p)) && sources.length === 1) throw new Error('Select the text to convert.');
   // Text in one table cell becomes a table nested in that cell.
@@ -1012,7 +1074,9 @@ export function convertTextToTable(model, { separator = 'tab', other, columns = 
   // A table needs a paragraph after it; the last converted paragraph's formatting supplies one if none follows.
   const after = model.paragraphs[last + 1];
   const tail = after && (after.cellId || null) === parentId ? [] : [(() => { const p = { ...copy(sources.at(-1)), id: paragraph().id, runs: [] }; delete p.list; return resolveStyledParagraph(p, styles, model.numbering); })()];
-  model.paragraphs.splice(first, last - first + 1, ...content, ...tail);
+  // Text right after a table keeps an empty paragraph between that table and the new one.
+  const head = tableJustBefore(model, first, parentId) ? [separatorLike(model, sources[0], parentId)] : [];
+  model.paragraphs.splice(first, last - first + 1, ...head, ...content, ...tail);
   model.tables.push(table);
   model.selectCell(table.rows[0].cells[0].id);
   model.didChange(); return true;
@@ -1020,6 +1084,7 @@ export function convertTextToTable(model, { separator = 'tab', other, columns = 
 
 /** Convert Table to Text: each row becomes a paragraph (cells separated), or each cell its paragraphs. */
 export function convertTableToText(model, { separator = 'tab', other } = {}) {
+  refuseUntracked(model, 'Converting a table to text');
   const char = separatorChar(separator, other), table = requireBlock(model).table;
   const ids = new Set(tableCells(table).map(cell => cell.id));
   if (model.tables.some(t => ids.has(t.parentCellId))) throw new Error('Convert the tables inside this table first.');
@@ -1037,9 +1102,10 @@ export function convertTableToText(model, { separator = 'tab', other } = {}) {
   };
   const output = [];
   for (const row of table.rows) {
-    const cells = row.cells.filter(cell => owners.get(cell.id).cell === cell).map(cell => state.byCell.get(cell.id) || []);
+    // A cell merged down from above holds its place in the row as an empty field, so the columns stay lined up.
+    const cells = row.cells.map(cell => owners.get(cell.id).cell === cell ? state.byCell.get(cell.id) || [] : []);
     if (char === null) { for (const content of cells) output.push(...content.map(scope)); continue; }
-    const p = scope(cells[0]?.[0] || paragraph());
+    const p = scope(cells.find(content => content.length)?.[0] || paragraph());
     p.runs = []; delete p.fieldMarkers; delete p.bookmarks;
     let at = 0;
     const append = (source, text) => {
@@ -1049,7 +1115,7 @@ export function convertTableToText(model, { separator = 'tab', other } = {}) {
       if (text) {
         // The separator takes the formatting of the text before it, as plain text: not a copy of an
         // object run (a picture, equation, note reference, field or control) nor of a change mark.
-        const style = p.runs.at(-1) || { ...(cells[0]?.[0]?.runs[0] || {}), properties: '', overrides: {} }, run = { ...copy(style), text };
+        const style = p.runs.at(-1) || { ...(cells.find(content => content.length)?.[0]?.runs[0] || {}), properties: '', overrides: {} }, run = { ...copy(style), text };
         for (const key of OBJECT_RUN_KEYS) delete run[key];
         p.runs.push(run); at += text.length;
       }
@@ -1134,6 +1200,7 @@ export function drawLine(model, { tableId: id, orientation, cellIds, offset, wid
 
 /** Eraser: remove the line between two cells, merging them when they line up. */
 export function eraseLine(model, { tableId: id, cellIds }) {
+  refuseUntracked(model, 'Erasing a line between cells');
   const table = model.tables.find(t => t.id === id);
   if (!table || cellIds?.length !== 2) throw new Error('Erase a line between two cells.');
   const block = blockBetween(table, cellIds[0], cellIds[1]);
@@ -1183,8 +1250,10 @@ export function moveTable(model, tableId, beforeId) {
   if (model.paragraphs[target].cellId) throw new Error('Drop the table between paragraphs outside tables.');
   if (table.floating) throw new Error('Floating tables keep their position. Set Text wrapping to None to move one in the text.');
   model.checkpoint();
-  const moved = model.paragraphs.splice(state.start, state.count);
-  model.paragraphs.splice(model.paragraphs.findIndex(p => p.id === beforeId), 0, ...moved);
+  const moved = model.paragraphs.splice(state.start, state.count), at = model.paragraphs.findIndex(p => p.id === beforeId);
+  // Dropped right under another table: an empty paragraph keeps them two tables.
+  const head = tableJustBefore(model, at, null) ? [separatorLike(model, model.paragraphs[at], null)] : [];
+  model.paragraphs.splice(at, 0, ...head, ...moved);
   repairStructuralBookmarks(model.paragraphs, state.bookmarks, model.tables, table.id);
   normalizeBlockBookmarkScopes(model.paragraphs, model.tables);
   model.selectCell(editableCells(table)[0].id);

@@ -55,6 +55,7 @@ import * as P from '../lib/puter.js';
 import { printPages } from '../lib/print.js';
 import { templateById } from '../lib/templates.js';
 import { autocorrectEnabled, capitalizeSentencesEnabled, correction, sentenceCapital } from '../lib/autocorrect.js';
+import { execClipboardCommand } from '../lib/clipboard.js';
 import { autolinkEnabled, linkCandidateBefore } from '../lib/linkify.js';
 import { layoutTemplate } from '../lib/template-layout.js';
 import { createWordCommands, documentStatistics as documentStatisticsOf } from './editor-commands.js';
@@ -90,7 +91,7 @@ import { listVersions } from '../lib/versions.js';
 import { publishPage, findSite, unpublishPage } from '../lib/publish.js';
 import { listCustomTemplates } from '../lib/customtemplates.js';
 import { Doc, versioning, publishing } from '../lib/doc.js';
-import { currentTheme, isDark, darkPage, setDarkPage } from '../ui/theme.js';
+import { currentTheme, isDark, darkPage, setDarkPage, onThemeChange } from '../ui/theme.js';
 import { UNITS, recallUnit, rememberUnit } from '../lib/units.js';
 import { setAutocorrectEnabled, setCapitalizeSentencesEnabled } from '../lib/autocorrect.js';
 import { setAutolinkEnabled } from '../lib/linkify.js';
@@ -171,8 +172,17 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     const textSelected = engine.model.range[0] !== engine.model.range[1] && (!image || engine.copiesPicture());
     return { cut: editable && textSelected, copy: textSelected, paste: editable && !image };
   };
+  // A browser that does not let the page use the clipboard (permission refused, or a frame without it) refuses
+  // with its own technical message; the keyboard's Cut, Copy and Paste need no permission.
+  const clipboardError = (e, reading) => error(e?.name === 'NotAllowedError' || e?.name === 'SecurityError'
+    ? new Error(reading ? `The browser didn’t allow reading the clipboard. Paste with ${MOD_KEY}+V, or ${MOD_KEY}+Shift+V for the text alone.` : `The browser didn’t allow using the clipboard. Use ${MOD_KEY}+C to copy or ${MOD_KEY}+X to cut.`)
+    : e);
   const copyText = async cut => {
     const editor = engine; if (!editor) return;
+    // The browser's own Copy and Cut send the clipboard event the keyboard's do, which writes the same text and
+    // formats and needs no permission (a frame given no clipboard access refuses the clipboard API).
+    editor.focus({ paint: false });
+    if (execClipboardCommand(cut ? 'cut' : 'copy')) { if (!destroyed) engine?.focus(); return; }
     const selection = [...editor.model.range], revision = editor.session.revision;
     try {
       // The same text and HTML a keyboard copy writes: pictures as their alternative text, not as placeholders.
@@ -181,7 +191,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
         await navigator.clipboard.write([new ClipboardItem({ 'text/plain': new Blob([text], { type: 'text/plain' }), 'text/html': new Blob([html], { type: 'text/html' }) })]);
       } else await navigator.clipboard.writeText(text);
       if (cut && !destroyed && engine === editor && revision === editor.session.revision && JSON.stringify(selection) === JSON.stringify(editor.model.range)) editor.deleteSelection();
-    } catch (e) { if (!destroyed) error(e); }
+    } catch (e) { if (!destroyed) clipboardError(e, false); }
     if (!destroyed) engine?.focus();
   };
   // Paste without formatting: the clipboard's text only, on the conventional Ctrl/Cmd+Shift+V chord.
@@ -192,7 +202,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       const text = await navigator.clipboard.readText();
       if (!destroyed && engine === editor && revision === editor.session.revision && JSON.stringify(selection) === JSON.stringify(editor.model.range)) editor.pasteData(text, '');
       if (!destroyed) engine?.focus();
-    } catch (e) { if (!destroyed) error(e); }
+    } catch (e) { if (!destroyed) clipboardError(e, true); }
   };
   const pasteText = async () => {
     const editor = engine; if (!editor) return;
@@ -212,7 +222,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
         else editor.pasteData(text, html);
       }
       if (!destroyed) engine?.focus();
-    } catch (e) { if (!destroyed) error(e); }
+    } catch (e) { if (!destroyed) clipboardError(e, true); }
   };
   function openDocumentContextMenu({event,behind,selectBehind}) {
     if(!engine) return;
@@ -272,11 +282,12 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   };
   const host = el('div.canvas-host', { 'aria-label': 'Document pages' });
   const surface = el('div.canvas-document-surface', {}, host);
+  // Bookmarks are in the body: a link made in a note, header or footer goes to one there.
   const editHyperlink = (anchor = hyperlink, options = {}) => {
     if (!(anchor instanceof HTMLElement)) anchor = hyperlink;
     if (!engine) return; engine.finishComposition();
     if (!anchor.getClientRects().length) anchor = engine.input;
-    hyperlinkModal = openHyperlink({ anchor, ...options, link: engine.model.hyperlink?.link, bookmarks: engine.bookmarks, insert: engine.model.range[0] === engine.model.range[1] && !engine.model.hyperlink,
+    hyperlinkModal = openHyperlink({ anchor, ...options, link: engine.model.hyperlink?.link, bookmarks: engine.session.body.bookmarks, insert: engine.model.range[0] === engine.model.range[1] && !engine.model.hyperlink,
       apply: (target, text) => engine?.setHyperlink(target, text, { appearance: !engine.model.hyperlink }), remove: () => engine?.removeHyperlink(), open: () => engine?.openHyperlink() });
   };
   // A click on a link while editing shows where it goes, to follow, edit or remove it.
@@ -490,9 +501,12 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       engine.focus(); engine.revealCaret(); engine.onSelection();
     },
     pages: () => engine?.canvases || [], flushPages: () => engine?.flushPaint?.(), currentPage: () => engine?.caretPageIndex ?? 0,
-    search: text => { try { return engine?.model.findMatches(text, {}) || []; } catch { return []; } },
+    // The search covers the document's body, also while a header, footer or note is being edited.
+    search: text => { try { return engine?.session.body.findMatches(text, {}) || []; } catch { return []; } },
     version: () => (engine ? [engine, engine.session.revision, engine.session.body.revision, engine.session.path, engine.model, engine.model.revision, engine.model.trackChanges] : null),
-    text: () => engine?.model.text || '', selectMatch: match => engine?.selectMatch(match), highlight: matches => engine?.setFindHighlights(matches),
+    text: () => engine?.session.body.text || '',
+    selectMatch: match => { if (!engine) return; engine.finishComposition(); if (engine.session.path !== null) engine.editStory(null); engine.selectMatch(match); },
+    highlight: matches => engine?.setFindHighlights(engine.session.path === null ? matches : []),
     headingActions: () => editorCommands.headingActions || null });
   outlinePanel.node.id = 'canvas-outline-panel';
   function toggleOutline(visible = outlinePanel.node.hidden, { search = false } = {}) {
@@ -513,7 +527,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     toggleOutline(true, { search: true });
     if (selected && !/[\n\f\v]/.test(selected) && selected.length <= 255) outlinePanel.setSearch(selected);
   };
-  const outline = tool('Document outline', 'outline', () => toggleOutline(), { 'aria-expanded': 'false', 'aria-controls': outlinePanel.node.id, shortcut: `${MOD_KEY}+Alt+O` });
+  const outline = tool('Document outline', 'outline', () => toggleOutline(), { 'aria-expanded': 'false', 'aria-controls': outlinePanel.node.id, shortcut: MOD_KEY === 'Cmd' ? 'Cmd+Option+O' : 'Ctrl+Alt+O' });
   const outlineLevel = el('select', { disabled: true, 'aria-label': 'Outline level', title: 'Outline level does not change text formatting', onchange: () => engine?.setOutlineLevel(outlineLevel.value === 'inherit' ? null : Number(outlineLevel.value)) },
     el('option', { value: 'mixed', disabled: true }, 'Mixed levels'), el('option', { value: 'inherit' }, 'Use style level'),
     ...Array.from({ length: 9 }, (_, i) => el('option', { value: i }, `Level ${i + 1}`)), el('option', { value: 9 }, 'Body text'));
@@ -721,12 +735,20 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   // The slider's value is a percentage, and says so: a screen reader read a bare "100".
   const zoomSlider = el('input.ed-zoom-slider', { type: 'range', min: 10, max: 200, step: 1, value: 100, 'aria-label': 'Zoom slider', 'aria-valuetext': '100%', oninput: () => zoomControl.set(Number(zoomSlider.value) / 100),
     onpointerdown: () => { zoomDragged = true; }, onchange: () => { if (zoomDragged) { zoomDragged = false; engine?.focus(); } } });
-  const zoomStep = (label, icon, delta) => el('button.icon-btn.ed-zoom-step', { type: 'button', 'aria-label': label, title: label, onclick: () => {
+  // At the largest or smallest zoom the step has nothing to do: it says so (aria-disabled) and keeps the keyboard,
+  // which a disabled button would drop while the zoom is being stepped from it.
+  const zoomStep = (label, icon, delta) => el('button.icon-btn.ed-zoom-step', { type: 'button', 'aria-label': label, title: label, onclick: e => {
+    if (e.currentTarget.getAttribute('aria-disabled') === 'true') return;
     const now = Math.round((engine?.zoom ?? 1) * 100), next = delta > 0 ? Math.floor(now / 10) * 10 + 10 : Math.ceil(now / 10) * 10 - 10;
     zoomControl.set(Math.max(10, Math.min(200, next)) / 100);
   } }, commandIconEl(icon, 12));
   const zoomOut = zoomStep('Zoom Out', 'zoomOut', -1), zoomIn = zoomStep('Zoom In', 'zoomIn', 1);
-  function syncZoom() { if (engine) { zoomSlider.value = String(Math.round(engine.zoom * 100)); zoomSlider.setAttribute('aria-valuetext', `${zoomSlider.value}%`); } }
+  function syncZoom() {
+    if (!engine) return;
+    const percent = Math.round(engine.zoom * 100);
+    zoomSlider.value = String(percent); zoomSlider.setAttribute('aria-valuetext', `${percent}%`);
+    zoomOut.setAttribute('aria-disabled', String(percent <= 10)); zoomIn.setAttribute('aria-disabled', String(percent >= 200));
+  }
   function fitWidth() {
     if (!engine || zoom.value !== 'fit' || !host.clientWidth) return;
     const style = getComputedStyle(engine.pages);
@@ -791,8 +813,11 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   const tablesBaseExtendMenu = editorCommands.extendMenu, tablesBaseContextMenuItems = editorCommands.contextMenuItems;
   editorCommands.extendMenu = (id, kit) => [...(tablesBaseExtendMenu?.(id, kit) || []), ...tables.extendMenu(id, kit)];
   editorCommands.contextMenuItems = (context, kit) => [...(tablesBaseContextMenuItems?.(context, kit) || []), ...tables.contextMenuItems(context, kit)];
+  // Filled in once the review tools (which own document protection) exist.
+  const protectionHooks = {};
+  const protectedDocument = () => !!protectionHooks.protectedDocument?.();
   const references = createReferences({ editor: () => engine, pkg: () => pkg, error, onChange: () => update(),
-    base: { canEditHeader: editorCommands.canEditHeader, editHeader: editorCommands.editHeader, canUpdateFields: editorCommands.canUpdateFields, updateFields: editorCommands.updateFields,
+    base: { protectedDocument, canEditHeader: editorCommands.canEditHeader, editHeader: editorCommands.editHeader, canUpdateFields: editorCommands.canUpdateFields, updateFields: editorCommands.updateFields,
       openBookmarks: () => bookmarks.click(), showFieldCodes: () => { if (engine && !editorCommands.marksVisible?.()) editorCommands.toggleMarks?.(); } } });
   const baseExtendMenu = editorCommands.extendMenu, baseContextMenuItems = editorCommands.contextMenuItems;
   Object.assign(editorCommands, references.commands);
@@ -815,7 +840,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   const review = createReview({ editor: () => engine, pkg: () => pkg, host: () => (engine && !failed ? host : null), error, author: () => session.username, onChange: () => update(), onShift: () => { fitWidth(); rulers?.update(); }, hooks: reviewHooks });
   // Insert tab: galleries, pictures, drawings, fields, equations and symbols (insert-tab.js).
   const insert = createInsert({ editor: () => engine, pkg: () => pkg, error, docName: () => title.value, user: () => (!local && session.signedIn ? session.username : ''), onChange: () => update(),
-    base: { editHeader: editorCommands.editHeader, insertBlankPage: editorCommands.insertBlankPage, updateFields: editorCommands.updateFields, editDrawingText: options => editorCommands.drawingTextItems()?.find(item => !item.disabled)?.onSelect(options),
+    base: { protectedDocument, editHeader: editorCommands.editHeader, insertBlankPage: editorCommands.insertBlankPage, updateFields: editorCommands.updateFields, editDrawingText: options => editorCommands.drawingTextItems()?.find(item => !item.disabled)?.onSelect(options),
       link: () => editHyperlink(), bookmark: () => bookmarks.click(), comment: () => review.commands?.newComment?.() } });
   const baseMenu = editorCommands.extendMenu, baseContextItems = editorCommands.contextMenuItems;
   Object.assign(editorCommands, insert.commands);
@@ -958,7 +983,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
           get: () => { const z = recallZoom(); return z?.fit || (z?.value ? String(z.value) : '100'); }, set: v => rememberZoom(v === '100' ? { value: 100 } : { fit: v }) },
       ] },
       { id: 'typing', label: 'AutoCorrect', note: 'These apply as you type, in every document on this device.', controls: [
-        { type: 'toggle', label: 'Autocorrect as you type', hint: 'Smart quotes, dashes, ellipses, symbols and fractions; “- ” or “1. ” starts a list.', get: () => autocorrectEnabled(), set: on => setAutocorrectEnabled(on) },
+        { type: 'toggle', label: 'Autocorrect as you type', hint: 'Smart quotes, dashes, ellipses, symbols, fractions and a capital I; “- ” or “1. ” starts a list.', get: () => autocorrectEnabled(), set: on => setAutocorrectEnabled(on) },
         { type: 'toggle', label: 'Capitalize the first letter of sentences', get: () => capitalizeSentencesEnabled(), set: on => setCapitalizeSentencesEnabled(on) },
         { type: 'toggle', label: 'Link web and email addresses', hint: 'Addresses become links when you type a space or Return after them.', get: () => autolinkEnabled(), set: on => setAutolinkEnabled(on) },
       ] },
@@ -997,9 +1022,10 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   // Review tools: Editor pane, Thesaurus, Accessibility, Language, Compare, Restrict Editing (review-tools.js).
   const reviewTools = createReviewTools({ editor: () => engine, pkg: () => pkg, error, author: () => session.username, review, proofing, commands: editorCommands, documentName: () => title.value, openDocument: file => importFile?.(file),
     currentBytes: async () => new Uint8Array(await (pkg.readOnly ? doc.blob : engine.export(pkg)).arrayBuffer()), onChange: () => update() });
-  // Under protection (other than Lock Tracking) the Mailings commands, which rewrite the document and its settings, are unavailable.
-  mailingHooks.protectedDocument = () => reviewTools.protectionEnforced && !reviewTools.trackingLocked;
-  Object.assign(reviewHooks, { tints: reviewTools.tints, trackingLocked: () => reviewTools.trackingLocked, people: () => reviewTools.people(), commentsPane: reviewTools.commands.commentsPane, trackingOptions: reviewTools.commands.trackingOptions, showMarkupItems: reviewTools.commands.showMarkupItems, lockTracking: reviewTools.commands.lockTracking });
+  // Under protection (other than Lock Tracking) the Mailings commands, which rewrite the document and its settings, are unavailable,
+  // and so are new headers and footers and note and page-number settings, which no protected edit check sees.
+  mailingHooks.protectedDocument = protectionHooks.protectedDocument = () => reviewTools.protectionEnforced && !reviewTools.trackingLocked;
+  Object.assign(reviewHooks, { tints: reviewTools.tints, trackingLocked: () => reviewTools.trackingLocked, protection: () => reviewTools.protection, people: () => reviewTools.people(), commentsPane: reviewTools.commands.commentsPane, trackingOptions: reviewTools.commands.trackingOptions, showMarkupItems: reviewTools.commands.showMarkupItems, lockTracking: reviewTools.commands.lockTracking });
   Object.assign(editorCommands, reviewTools.commands);
   const reviewFileItems = editorCommands.fileItems;
   editorCommands.fileItems = () => [...(reviewFileItems?.() || []), ...reviewTools.fileItems()];
@@ -1311,7 +1337,21 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     if (IS_MAC && e.key === 'F10' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && engine && e.target === engine.input) {
       e.preventDefault(); openDocumentContextMenu({ event: { button: -1, clientX: 0, clientY: 0 } }); return;
     }
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.shiftKey && shortcutCode(e) === 'KeyV' && engine && host.contains(e.target)) { e.preventDefault(); pastePlainText(); return; }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.shiftKey && shortcutCode(e) === 'KeyV' && engine && host.contains(e.target)) {
+      // The browser's own paste for the chord (Paste as plain text, Paste and Match Style) needs no permission to
+      // read the clipboard, which reading it here asks for: the document takes that paste without formatting.
+      // Windows and Linux browsers always paste for the chord, though the paste event can come after a timer would
+      // fire, so nothing else pastes there. On a Mac the chord may paste nothing: the clipboard is read instead, and
+      // a browser paste that still follows is dropped, so the text never comes in twice.
+      if (e.target === engine.input && !pkg.readOnly) {
+        const editor = engine;
+        editor.plainPaste = true;
+        if (IS_MAC) setTimeout(() => { if (editor.plainPaste) { editor.plainPaste = false; editor.plainPasteReadAt = performance.now(); if (engine === editor) pastePlainText(); } });
+        else setTimeout(() => { editor.plainPaste = false; }, 1000);
+        return;
+      }
+      e.preventDefault(); pastePlainText(); return;
+    }
     const action = formattingShortcut(e);
     if (action) { e.preventDefault(); action(); }
   });
@@ -1487,16 +1527,49 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     updateWordCount();
     statusBar?.refresh();
   }
+  // Scrolled away from the caret, the status bar names the page in view, as desktop word processors do; while the
+  // caret's page shows, and at the next caret move or edit (update), it names the caret's. Once a frame, reading only
+  // the pages' offsets, which scrolling leaves laid out.
+  let pageInViewFrame = 0;
+  host.addEventListener('scroll', () => {
+    if (pageInViewFrame) return;
+    pageInViewFrame = requestAnimationFrame(() => {
+      pageInViewFrame = 0;
+      if (!engine || failed || destroyed || host.hidden) return;
+      const index = pageInView();
+      if (index !== null) stats.textContent = `Page ${index + 1} of ${engine.layout.pageCount}`;
+    });
+  }, { passive: true });
+  function pageInView() {
+    const list = engine.canvases, count = engine.layout.pageCount;
+    if (!list.length) return null;
+    const top = host.scrollTop, bottom = top + host.clientHeight, left = host.scrollLeft, right = left + host.clientWidth;
+    const shows = canvas => canvas && canvas.offsetTop < bottom && canvas.offsetTop + canvas.offsetHeight > top && canvas.offsetLeft < right && canvas.offsetLeft + canvas.offsetWidth > left;
+    const caret = Math.min(count - 1, engine.caretPageIndex ?? 0);
+    if (shows(list[caret])) return caret;
+    // The last page starting above the middle of the view (pages run down, or across in rows)…
+    const x = (left + right) / 2, y = (top + bottom) / 2;
+    let lo = 0, hi = list.length - 1, at = 0;
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (list[mid].offsetTop <= y) { at = mid; lo = mid + 1; } else hi = mid - 1; }
+    // …and of its row, the one nearest the middle across.
+    let best = at, distance = Infinity;
+    for (let i = at; i >= 0 && list[i].offsetTop === list[at].offsetTop; i--) {
+      const c = list[i], d = x < c.offsetLeft ? c.offsetLeft - x : Math.max(0, x - c.offsetLeft - c.offsetWidth);
+      if (d < distance) { distance = d; best = i; }
+    }
+    return Math.min(best, count - 1);
+  }
   // The counts last shown, with the text and selection they were taken from: every caret move and each keystroke
   // (twice) refresh the status bar, and splitting a long document into words takes milliseconds each time.
   let counted = { text: null, a: 0, b: 0, total: 0, chosen: null };
   function updateWordCount() {
-    const text = engine.model.text, [a, b] = engine.model.range;
-    if (text !== counted.text || a !== counted.a || b !== counted.b) {
-      // The Word Count dialog counts with the same rule, so the two always agree.
+    // The document's words, also while a header, footer or note is edited (the words selected there are counted
+    // against them): the Word Count dialog counts with the same rule, so the two always agree.
+    const text = engine.session.body.text, story = engine.model.text, [a, b] = engine.model.range;
+    if (text !== counted.text || story !== counted.story || a !== counted.a || b !== counted.b) {
       const total = text === counted.text ? counted.total : countWords(text);
-      const chosen = a !== b ? countWords(text.slice(a, b)) : null;
-      counted = { text, a, b, total, chosen };
+      const chosen = a !== b ? countWords(story.slice(a, b)) : null;
+      counted = { text, story, a, b, total, chosen };
     }
     const { total, chosen } = counted;
     words.textContent = chosen !== null ? `${chosen} of ${total} ${total === 1 ? 'word' : 'words'}` : `${total} ${total === 1 ? 'word' : 'words'}`;
@@ -1611,8 +1684,12 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       stepDesignVersion(direction);
       return true;
     };
+    // Dark paper on screen with the dark appearance's Dark page preference, from the first paint.
+    created.darkPage = isDark() && darkPage();
     return created;
   }
+  // Switching the appearance or the preference repaints the open pages at once.
+  const offTheme = onThemeChange(() => engine?.setDarkPage?.(isDark() && darkPage()));
   /*
    * Design-wide changes (themes, style sets, watermarks, page fills) rewrite parts of the saved package
    * and reopen the result in place. Each keeps the bytes before and after it, so Undo past the editor's
@@ -1730,7 +1807,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     // Pictures in a Markdown file or web page are not brought in yet: the notices say how many were left out.
     const omittedPictures = importedHtml && /<img\b/i.test(importedHtml) ? new DOMParser().parseFromString(importedHtml, 'text/html').querySelectorAll('img').length : 0;
     if (importedHtml !== null) {
-      const fragment = htmlFragment(importedHtml);
+      const fragment = htmlFragment(importedHtml, { copied: false });
       if (fragment) importing(() => {
         // In a new document every imported block keeps its own formatting.
         for (const p of fragment.paragraphs) p.mark = true;
@@ -1845,6 +1922,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       finally { clearTimeout(timer); }
     },
     destroy() {
+      offTheme();
       drawingTextModal?.close();
       printAbort.abort();
       destroyed = true; linkCard.destroy(); tables.destroy(); paragraphBorderModal?.close(); paragraphShadingModal?.close(); bookmarkModal?.close(); hyperlinkModal?.close(); pageSetupModal?.close(); paragraphModal?.close(); styleModal?.close(); tableModal?.close(); imageModal?.close(); fontPopover?.close(); colorPalette?.close(); highlightPalette?.close(); baselineModal?.close(); characterSpacingModal?.close(); textWidthModal?.close(); kerningModal?.close(); underlineModal?.close();

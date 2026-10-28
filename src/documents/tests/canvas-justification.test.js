@@ -90,10 +90,17 @@ it('shares expanded advances across mixed runs, decorations, scripts, small caps
   const unicode = layout(simple('A\u0301😀 one two\vFinal')).lines[0]; expect(unicode.stops.map(s => s.offset)).toEqual([0, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
 });
 
-it('anchors earlier tab fields and rejects expansion of non-left final fields', () => {
+it('anchors earlier tab fields and leaves lines ending in a non-left tab field natural', () => {
   const doc = simple('One two\tA B\vFinal', {}, { tabs: [{ position: 1800, alignment: 'left' }] }); const first = layout(doc).lines[0];
   expect(first.stops.find(s => s.offset === 4).x).toBe(80); expect(first.stops.find(s => s.offset === 8).x).toBe(168); expect(edge(first)).toBeCloseTo(312);
-  for (const alignment of ['center', 'right', 'decimal']) expect(() => layout(simple('Label\tA B\vFinal', {}, { tabs: [{ position: 1800, alignment }] }))).toThrow(/justification after/);
+  // After a center, right or decimal tab the line keeps its natural spacing: the aligned field stays on
+  // its stop rather than the document being refused.
+  for (const alignment of ['center', 'right', 'decimal']) {
+    const natural = layout(simple('Label\tA B\vFinal', {}, { alignment: 'left', tabs: [{ position: 1800, alignment }] })).lines[0];
+    const line = layout(simple('Label\tA B\vFinal', {}, { tabs: [{ position: 1800, alignment }] })).lines[0];
+    expect(line.justificationSpacing).toBeUndefined();
+    expect(line.stops.map(s => s.x)).toEqual(natural.stops.map(s => s.x));
+  }
   expect(() => layout(simple('Label\tA B', {}, { tabs: [{ position: 1800, alignment: 'right' }] }))).not.toThrow();
 });
 
@@ -150,14 +157,23 @@ it('edits a shared style, preserves direct alignment overrides, and splits/merge
   expect(newDoc.text).toBe('Alpha beta'); expect(model(await DocxPackage.open(await save(fresh, newDoc))).paragraphs[0].format.alignment).toBe('both');
 });
 
-it.each(['<w:jc/>', '<w:jc w:val=""/>', '<w:jc w:val="both"/><w:jc w:val="left"/>', '<w:jc w:val="both">text</w:jc>', '<w:jc w:val="both" w:other="1"/>', '<w:jc w:val="both"><w:jc/></w:jc>', '<w:jc w:val="distribute"/>'])('rejects malformed or unsupported active alignment: %s', async markup => {
+it.each(['<w:jc/>', '<w:jc w:val=""/>', '<w:jc w:val="both"/><w:jc w:val="left"/>', '<w:jc w:val="both">text</w:jc>', '<w:jc w:val="both" w:other="1"/>', '<w:jc w:val="both"><w:jc/></w:jc>', '<w:jc w:val="thaiDistribute"/>'])('rejects malformed or unsupported active alignment: %s', async markup => {
   await expect(DocxPackage.open(rewrite('<w:jc w:val="both"/>', markup))).rejects.toThrow();
 });
 
-it('rejects Arabic justification rather than silently substituting inter-word spacing for kashida', async () => {
-  await expect(DocxPackage.open(rewrite('Direct both ', 'Direct both العربية '))).rejects.toThrow(/kashida/);
-  expect(() => layout(simple('العربية words'))).toThrow(/kashida/);
-  const doc = simple('One two'); for (const alignment of ['justify', 'distribute', 'lowKashida']) expect(() => doc.setParagraphFormat({ alignment })).toThrow();
+it('justifies Arabic by its word spaces instead of refusing it, without kashida', async () => {
+  // Kashida elongation is not drawn: Arabic lines are filled by widening their spaces, as Latin text.
+  const pkg = await DocxPackage.open(rewrite('Direct both ', 'Direct both العربية '));
+  expect(model(pkg).paragraphs.some(p => paragraphText(p).includes('العربية'))).toBe(true);
+  const arabic = 'هذا نص عربي طويل يلتف عبر عدة أسطر للتأكد من أن التخطيط يعمل بشكل صحيح في المحرر';
+  const result = layout(simple(arabic)), lines = result.lines;
+  expect(lines.length).toBeGreaterThan(1);
+  for (const line of lines.slice(0, -1)) { expect(line.justificationSpacing).toBeGreaterThan(0); expect(edge(line)).toBeCloseTo(312); }
+  expect(lines.at(-1).justificationSpacing).toBeUndefined();
+  expect(lines.flatMap(l => l.fragments).every(f => !f.text.includes('\u0640'))).toBe(true);
+  const typed = simple('Alpha beta gamma delta epsilon zeta eta theta iota'); typed.select(6); typed.replace('العربية ');
+  expect(() => layout(typed)).not.toThrow();
+  const doc = simple('One two'); for (const alignment of ['justify', 'thaiDistribute', 'lowKashida']) expect(() => doc.setParagraphFormat({ alignment })).toThrow();
   expect(doc.undo()).toBe(false);
 });
 

@@ -15,10 +15,25 @@ const words = typeof Intl?.Segmenter === 'function' ? new Intl.Segmenter(undefin
 // punctuation and currency signs) for Japanese and Chinese. Nor does a line break before a hyphen,
 // on either side of a straight quote, or inside a doubled dash. Hangul is left to the space rules:
 // Korean is wrapped between words. Spaces and inline objects keep their own rules.
-const IDEOGRAPHIC = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Bopomofo}\u3001-\u303f\u30fb\u30fc\uff01-\uff65\uffe0-\uffe6]/u;
+export const IDEOGRAPHIC = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Bopomofo}\u3001-\u303f\u30fb\u30fc\uff01-\uff65\uffe0-\uffe6]/u;
 const NO_START = new Set('"\'-‐‑–!%),.:;?]}¢°·’”‰′″℃∶、。〃〆〉》」』】〕〗〙〞〟ぁぃぅぇぉっゃゅょゎゕゖ゛゜ゝゞ゠ァィゥェォッャュョヮヵヶ・ーヽヾㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿ々〻‥…﹚﹜！＂％＇），．：；？］｝～｡｣､･ｧｨｩｪｫｬｭｮｯｰﾞﾟ￠');
 const NO_END = new Set('"\'$([{£¥·‘“〈《「『【〔〖〘〝﹙﹛＄（［｛｢￡￥');
 const OPEN_SPACE = /[\s\ufffc]/u;
+// Em and en dashes and the zero-width space allow a line to end after them in any script (UAX #14
+// classes B2, BA and ZW), so a phrase joined by em dashes or a long path with zero-width spaces
+// wraps there rather than mid-word. A doubled dash stays together, and a dash keeps the closing
+// punctuation that follows it. U+2010 compounds stay together, as the reference controls under
+// tests/fixtures/hyphen-wrap show.
+const BREAK_AFTER = /[\u200b\u2013\u2014]/u;
+// A word joiner (or a zero-width no-break space) forbids a break on either side (UAX #14 class WJ).
+const WORD_JOINER = /[\u2060\ufeff]/u;
+function dashBreaks(text, breaks) {
+  for (let index = 0; index < text.length - 1; index++) {
+    const c = text[index], next = text[index + 1];
+    if (!BREAK_AFTER.test(c) || OPEN_SPACE.test(next) || WORD_JOINER.test(next) || c !== '\u200b' && (next === c || NO_START.has(next))) continue;
+    breaks.add(index + 1);
+  }
+}
 const graphemes = typeof Intl?.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
 function* codePoints(text) { let index = 0; for (const segment of text) { yield { segment, index }; index += segment.length; } }
 function ideographicBreaks(text, breaks) {
@@ -34,14 +49,16 @@ function ideographicBreaks(text, breaks) {
 
 /**
  * Offsets in `text` where a line may break besides spaces and hyphens: between dictionary-segmented
- * Thai, Lao, Khmer or Myanmar words, and beside ideographs and kana. Null when there are none.
+ * Thai, Lao, Khmer or Myanmar words, beside ideographs and kana, and after dashes and zero-width
+ * spaces. Null when there are none.
  */
 export function dictionaryBreaks(text) {
-  const complex = !!words && COMPLEX.test(text), ideographic = IDEOGRAPHIC.test(text);
-  if (!complex && !ideographic) return null;
+  const complex = !!words && COMPLEX.test(text), ideographic = IDEOGRAPHIC.test(text), dashes = BREAK_AFTER.test(text);
+  if (!complex && !ideographic && !dashes) return null;
   const breaks = new Set();
   if (complex) complexWordBreaks(text, breaks);
   if (ideographic) ideographicBreaks(text, breaks);
+  if (dashes) dashBreaks(text, breaks);
   return breaks.size ? breaks : null;
 }
 

@@ -17,7 +17,7 @@ import { pageGeometry, readingPageGeometry } from './page-settings.js';
 import { layoutParagraphBorders } from './paragraph-border-layout.js';
 import { layoutTableBorders, tableRowBorderWidths, tableBorderWidth, cellBorderLayoutWidth, tableHorizontalInsets } from './table-border-layout.js';
 import { cellWritingTopBorder, rowTableBorder } from './cell-borders.js';
-import { checkJustificationText, justificationRange } from './justification.js';
+import { justificationRange, justifiedStyle } from './justification.js';
 import { contractionMetrics, fitContractedWord } from './justification-contraction.js';
 import { borderOutset, visibleParagraphBorders } from './paragraph-borders.js';
 import { documentBlocks, fixedColumnWidths, roundColumnWidths, autoColumnWidths, rowGrid, spanWidth, headerRowCount, minimumSpanWidth } from './tables.js';
@@ -29,7 +29,7 @@ import { listMarkers } from './numbering.js';
 import { markerGeometry } from './list-layout.js';
 import { paragraphEdges } from './paragraph-geometry.js';
 import { LineBuilder } from './line-builder.js';
-import { bidiCharacters, bidiLineCharacters, bidiRtlSpace } from './bidi-text.js';
+import { bidiCharacters, bidiLineCharacters, bidiRtlSpace, bidiCharacterType } from './bidi-text.js';
 import { createParagraphPaginator } from './pagination.js';
 import { paragraphText, paragraphFormat, runFormat } from './model.js';
 import { revisionView, runRevisionDisplay, revisionViewKey } from './revisions.js';
@@ -56,6 +56,10 @@ import { paragraphFrameGroups, measureParagraphFrame, placeParagraphFrames, Unsu
 import { autoHyphenationBreak, hyphenCharacter } from './hyphenation-layout.js';
 import { hyphenationOf } from './hyphenation-settings.js';
 
+// Text with a strong right-to-left letter (bidi class R or AL). Digits and marks of these scripts
+// are not: they keep the left-to-right path in an ordinary run.
+const RTL_SCRIPTS = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]|[\u{10800}-\u{10fff}\u{1e800}-\u{1efff}]/u;
+const strongRtl = text => RTL_SCRIPTS.test(text) && [...text].some(c => RTL_SCRIPTS.test(c) && ['R', 'AL'].includes(bidiCharacterType(c)));
 export const PAGE = Object.freeze({ width: 816, height: 1056, margin: 96, gap: 24, lineHeight: 26, paragraphGap: 12, fontSize: 16 });
 export const MAX_PAGES = 200;
 export const font = style => `${style.italic ? 'italic' : 'normal'} ${style.bold ? 700 : 400} ${(style.fontSize ?? 12) * 4 / 3}px ${canvasFontFamily(style)}`;
@@ -547,10 +551,8 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
       // tblHeader is retained in nested tables, but those rows do not repeat.
       // A containing top-level header still repeats its complete nested content.
       const count = table.parentCellId ? 0 : headerRowCount(table);
-      if (count) {
-        const tableHeader = prepareTableHeader(rows.map(row => row.tableRow), count, page, paginateParagraphs);
-        return [{ tableHeader, height: tableHeader.height + tableHeader.minimum, format: { keepLines: true } }];
-      }
+      const tableHeader = count ? prepareTableHeader(rows.map(row => row.tableRow), count, page, paginateParagraphs) : null;
+      if (tableHeader) return [{ tableHeader, height: tableHeader.height + tableHeader.minimum, format: { keepLines: true } }];
       return mergedRowGroups(rows);
     };
     const measuredPage = page;
@@ -822,7 +824,6 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
   }
   const floating = floatingParagraph(p, documentOffset, format, page);
   if (floating) return floating;
-  checkJustificationText(text, format.alignment);
   if (cellBounds && page.allowSpaceOfSameStyleInTable) format.contextualSpacing = false;
   // Within a row, the next cell's first source paragraph supplies the context.
   // At the row end, an implicit Normal-style boundary is used instead.
@@ -862,9 +863,10 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
     const displayText = inlineDisplayText(p.runs[runIndex], s.segment);
     chars.push({ text: ignoredCellBreak ? '' : displayText, ignoredCellBreak, ...(noBreakHyphen ? { noBreakHyphen: true } : {}), ...(wordBreaks?.has(s.index + s.segment.length) ? { wordBreak: true } : {}), breakClear: p.runs[runIndex]?.breakClear, start: documentOffset + s.index, end: documentOffset + s.index + s.segment.length, style: textFontStyle(displayText, runStyle), image: runHidden ? undefined : p.runs[runIndex]?.image, positionalTab: p.runs[runIndex]?.positionalTab });
   }
-  // Active RTL import/editing remains guarded while interaction is verified.
-  // Do not alter the existing unmarked-text path during that rollout.
-  if (chars.some(c=>c.style.rtl)) chars=bidiCharacters(chars);
+  // Active RTL import/editing remains guarded while interaction is verified. Hebrew or Arabic typed
+  // into an ordinary run (no w:rtl) is still right-to-left text (UAX #9): it is ordered by the same
+  // path, so its carets and selection follow the glyphs instead of mirroring them.
+  if (chars.some(c=>c.style.rtl) || strongRtl(text)) chars=bidiCharacters(chars);
   // Leading page/column breaks move the first text line without consuming its
   // first-line indent. Spaces, tabs, manual line breaks and list markers do
   // consume it. Keep source offsets and the break-only pagination lines intact.
@@ -992,13 +994,15 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
       }
     }
     const lastLine = end === chars.length || hardBreak === 'page' && end === chars.length - 1 && !page.splitPgBreakAndParaMark;
-    if (format.alignment === 'both' && !contraction && !lastLine && !(hardBreak === 'line' && page.doNotExpandShiftReturn)) {
-      const range = justificationRange(span, measured, right, builder.field.tab);
+    // Distributed alignment (§17.18.44 distribute) spreads every line, the last one included.
+    const distribute = format.alignment === 'distribute';
+    if (distribute || format.alignment === 'both' && !contraction && !lastLine && !(hardBreak === 'line' && page.doNotExpandShiftReturn)) {
+      const range = justificationRange(span, measured, right, builder.field.tab, distribute);
       if (range) {
         let spacing = range.spacing;
         for (let attempt = 0; attempt < 4; attempt++) {
           const expanded = new LineBuilder(left, right, format, page, measure, offset);
-          span.forEach((c, index) => expanded.add(index >= range.first && index < range.last && !c.image && (!/^\p{White_Space}+$/u.test(c.text) || c.text === ' ' || c.text === '\u00a0') ? { ...c, style: { ...c.style, justificationSpacing: spacing } } : c));
+          span.forEach((c, index) => expanded.add(index >= range.first && index < range.last && !c.image && (!/^\p{White_Space}+$/u.test(c.text) || c.text === ' ' || c.text === '\u00a0') ? { ...c, style: justifiedStyle(c.style, range, index, spacing) } : c));
           measured = { ...expanded.finish(markStyle, ignoreMark, !!marker), justificationSpacing: spacing };
           const overflow = measured.stops.at(-1).x - measured.ignoredTrailingWidth - right;
           if (overflow <= 1e-6) break;

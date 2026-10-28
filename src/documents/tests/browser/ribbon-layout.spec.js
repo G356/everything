@@ -575,3 +575,68 @@ test('Escape closes a collapsed group\'s drop-down whose commands are all unavai
     await expect(changes).toBeFocused();
   } finally { await context.close(); }
 });
+
+test('a tab the document chooses on a phone is scrolled into the tab row', async ({ page }) => {
+  await openEditor(page, 390);
+  await page.getByRole('textbox', { name: 'Document text' }).fill('Heading\nBody text');
+  const shown = name => page.evaluate(name => {
+    const tab = [...document.querySelectorAll('.ribbon-tab')].find(t => t.textContent.trim() === name), row = tab.closest('.ribbon-tabs');
+    const a = tab.getBoundingClientRect(), b = row.getBoundingClientRect();
+    return a.left >= b.left - 1 && a.right <= b.right + 1;
+  }, name);
+  // Outline view brings up its Outlining tab, at the end of the row.
+  await page.evaluate(() => window.__docs.current.view.commands.setDocumentView('outline'));
+  await expect(tab(page, 'Outlining')).toHaveAttribute('aria-selected', 'true');
+  await expect.poll(() => shown('Outlining')).toBe(true);
+  // Closing it goes back to a tab at the start of the row.
+  await page.getByRole('button', { name: 'Close Outline View' }).click();
+  await expect(tab(page, 'Outlining')).toBeHidden();
+  const selected = await page.locator('.ribbon-tab[aria-selected="true"]').textContent();
+  await expect.poll(() => shown(selected.trim())).toBe(true);
+});
+
+test('a phone held sideways folds the ribbon to its tabs, leaving the height to the page', async ({ page }) => {
+  await page.setViewportSize({ width: 844, height: 390 });
+  await page.goto('/mock.html#/new');
+  await page.locator('.ribbon-card').waitFor({ state: 'attached' });
+  const bold = page.locator('#ribbon-panel-home button[aria-label="Bold"]');
+  await expect(page.getByRole('tab', { name: 'Home', exact: true })).toBeVisible();
+  await expect(bold).toBeHidden();
+  // Most of the window is the document's.
+  const host = await page.locator('.canvas-host').first().boundingBox();
+  expect(host.height).toBeGreaterThan(390 / 2);
+  // A tab shows its commands over the page, as Show Tabs Only does.
+  await page.getByRole('tab', { name: 'Home', exact: true }).click();
+  await expect(bold).toBeVisible();
+  await bold.click();
+  await expect(bold).toBeHidden();
+  // Upright again, the ribbon is shown as before; the remembered choice was never changed.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator('.ed-workspace')).not.toHaveClass(/ribbon-tabs-only/);
+  expect(await page.evaluate(() => localStorage.getItem('documents:ribbon-mode'))).toBeNull();
+  // Sideways, Always Show keeps it shown.
+  await page.setViewportSize({ width: 844, height: 390 });
+  await expect(page.locator('.ed-workspace')).toHaveClass(/ribbon-tabs-only/);
+  await page.getByRole('button', { name: 'Always show the ribbon' }).click();
+  await expect(page.locator('.ed-workspace')).not.toHaveClass(/ribbon-tabs-only/);
+  await expect(bold).toBeVisible();
+});
+
+test('on a phone, Auto-hide\'s show-ribbon button leaves the document name as much room as before', async ({ browser }) => {
+  const width = async mode => {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    const page = await context.newPage();
+    await page.addInitScript(mode => { try { localStorage.setItem('documents:ribbon-mode', mode); } catch { /* storage unavailable */ } }, mode);
+    await page.goto('/mock.html#/new');
+    await page.locator('.ribbon-card').waitFor({ state: 'attached' });
+    await expect(page.getByRole('textbox', { name: 'Document name' })).toBeVisible();
+    if (mode === 'auto') await expect(page.getByRole('button', { name: 'Show the ribbon' })).toBeVisible();
+    await page.waitForTimeout(300);
+    const shown = await page.getByRole('textbox', { name: 'Document name' }).evaluate(el => el.clientWidth);
+    await context.close();
+    return shown;
+  };
+  const always = await width('always'), auto = await width('auto');
+  // Within a few pixels: the name shows its first letters either way (it was cut to one letter).
+  expect(auto).toBeGreaterThanOrEqual(always - 10);
+});

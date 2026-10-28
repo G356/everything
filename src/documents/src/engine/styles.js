@@ -4,7 +4,7 @@ import { FONT_DEFAULTS, FONT_SLOTS, checkedFontEdit } from './font-families.js';
 import { BORDER_SIDES, checkedParagraphBorders } from './paragraph-borders.js';
 import { checkedUnderline, underlineDeclaration } from './underlines.js';
 import { checkedCapitalization, resolveCapitalization, checkCapitalizationText, capitalizationDeclarations } from './capitalization.js';
-import { checkedStrike, resolveStrike } from './strikethrough.js';
+import { checkedStrike, resolveStrike, strikeDeclarations } from './strikethrough.js';
 import { checkedLigatures } from './ligatures.js';
 import { checkedKerning } from './kerning.js';
 import { checkedTextScale } from './text-scale.js';
@@ -66,8 +66,11 @@ export function styleRun(styles, id, inherited = styles.defaults.run, type = 'pa
   // Find the nearest declaration of each form; an off declaration of one
   // form must not erase a different form inherited through basedOn.
   const strikes = new Map();
-  chain.forEach((s, index) => { if (s.run.strikethrough !== undefined) { checkedStrike(s.run.strikethrough, true); strikes.set(s.run.strikethrough.startsWith('double') ? 'double' : 'single', { index, value: s.run.strikethrough }); } });
-  result.strikethrough = [...strikes.values()].sort((a,b) => a.index - b.index).reduce((mode, declaration) => resolveStrike(mode, declaration.value, type === 'character', resolveStrike('none', styles.defaults.run.strikethrough)), resolveStrike('none', inherited.strikethrough));
+  chain.forEach((s, index) => { if (s.run.strikethrough !== undefined) { checkedStrike(s.run.strikethrough, true); for (const value of strikeDeclarations(s.run.strikethrough)) strikes.set(value.startsWith('double') ? 'double' : 'single', { index, value }); } });
+  const strikeOrder = [...strikes.values()].sort((a,b) => a.index - b.index);
+  // Keep a pair declared at the same level simultaneous, as capitalization does.
+  if (strikeOrder.length === 2 && strikeOrder[0].index === strikeOrder[1].index) strikeOrder.splice(0, 2, { value: chain[strikeOrder[0].index].run.strikethrough });
+  result.strikethrough = strikeOrder.reduce((mode, declaration) => resolveStrike(mode, declaration.value, type === 'character', resolveStrike('none', styles.defaults.run.strikethrough)), resolveStrike('none', inherited.strikethrough));
   const capitals = new Map();
   chain.forEach((s, index) => { if (s.run.capitalization !== undefined) {
     checkedCapitalization(s.run.capitalization, true);
@@ -123,6 +126,11 @@ export function paragraphRunStyle(p, styles) {
   const table = p.cellId ? styleRun(styles, p.tableStyleId, defaults, 'table', p.tableStyleRegions) : defaults;
   return styleRun(styles, effectiveStyleId(p, styles), table);
 }
+/**
+ * The character unit of character-unit indents (§17.3.1.12), in twips: the East Asian font size of the
+ * Normal style, as Word measures it (a full-width character is one em wide). Evaluated only when needed.
+ */
+export const characterUnit = styles => () => (styleRun(styles, styles.defaultParagraph).fontSize || 12) * 20;
 export function resolveStyledParagraph(p, styles, numbering, options) {
   const tableChain = p.cellId ? withTableRegions(styleChain(styles, p.tableStyleId, 'table'), p.tableStyleRegions) : [];
   const base = tableChain.reduce((properties, s) => mergeProperties(properties, s.properties), styles.defaults.properties);
@@ -140,7 +148,7 @@ export function resolveStyledParagraph(p, styles, numbering, options) {
   const inheritedGeometry = cancelledIndent(inherited, context.reference);
   const properties = mergeProperties(inheritedGeometry, context.properties);
   p.frameProperties = properties.frameProperties;
-  const resolved = resolvedFormat(properties);
+  const unit = characterUnit(styles), resolved = resolvedFormat(properties, unit);
   p.format = { ...resolved, ...p.formatOverrides, paragraphBorders: { ...resolved.paragraphBorders, ...p.formatOverrides?.paragraphBorders } };
   clearAutomaticSpacing(p.format, p.formatOverrides);
   // MS-OI29500 §2.1.51: a built-in heading's ID fixes its effective outline level.
@@ -157,10 +165,10 @@ export function resolveStyledParagraph(p, styles, numbering, options) {
   // its descendants still override the numbering level.
   const numberingIndex = chain.findLastIndex(s => s.reference?.numId !== undefined);
   const split = Math.max(0, numberingIndex);
-  const chainGeometry = entries => geometryPatch(entries.reduce((properties, s) => mergeProperties(properties, s.properties), {}));
+  const chainGeometry = entries => geometryPatch(entries.reduce((properties, s) => mergeProperties(properties, s.properties), {}), false, unit);
   // Numbering levels' other paragraph properties resolve against the same three layers.
   const paragraph = { base: levelParagraphPatch(base), style: levelParagraphPatch(chain.reduce((properties, s) => mergeProperties(properties, s.properties), {})), direct: levelParagraphPatch(context.properties) };
-  p.listContext = { base: geometryPatch(base), style: chainGeometry(chain), afterNumbering: chainGeometry(chain.slice(split)), direct: geometryPatch(context.properties), paragraph };
+  p.listContext = { base: geometryPatch(base, false, unit), style: chainGeometry(chain), afterNumbering: chainGeometry(chain.slice(split)), direct: geometryPatch(context.properties, false, unit), paragraph };
   if (!p.listChanged) {
     const inheritedReference = Object.assign({}, styles.defaults.reference, ...tableChain.map(s => s.reference), ...chain.map(s => s.reference));
     const ref = { ...inheritedReference, ...context.reference };
@@ -243,8 +251,9 @@ export function editStyleProperties(properties, patch) {
       set(p.spacing, spacingKeys[key], key === 'lineSpacing' ? line && String(Math.round(line.lineSpacing * (lineRule === 'auto' ? 240 : 20))) : key === 'lineRule' ? value : String(Math.round(value * 20)));
       if (['spaceBefore', 'spaceAfter'].includes(key)) for (const suffix of ['Lines', 'Autospacing']) set(p.spacing, spacingKeys[key] + suffix, '0');
     }
-    else if (key in indentKeys) set(p.ind, indentKeys[key]);
-    else if (key === 'firstLine') { delete p.ind.firstLine; delete p.ind.hanging; if (value !== null) p.ind[value < 0 ? 'hanging' : 'firstLine'] = Math.abs(value); }
+    // An edited indent is in twips; its character-unit form (§17.3.1.12) is zeroed so an inherited one cannot override it.
+    else if (key in indentKeys) { set(p.ind, indentKeys[key]); set(p.ind, indentKeys[key] + 'Chars', 0); }
+    else if (key === 'firstLine') { for (const name of ['firstLine', 'hanging', 'firstLineChars', 'hangingChars']) delete p.ind[name]; if (value !== null) { p.ind[value < 0 ? 'hanging' : 'firstLine'] = Math.abs(value); p.ind[value < 0 ? 'hangingChars' : 'firstLineChars'] = 0; } }
     else if (key === 'tabs') { if (value === null) { delete p.tabs; delete p.tabChanges; } else { p.tabs = value; p.tabChanges = value; } }
     else set(p, key, key === 'paragraphShading' && value !== null ? checkedShading(value) : value);
   }
@@ -282,7 +291,7 @@ export function editedStyle(styles, id, patch, type = 'paragraph') {
     next.changes.paragraph.paragraphBorders = incoming === null ? null : { ...(previousBorders === null ? Object.fromEntries(BORDER_SIDES.map(side => [side, null])) : previousBorders), ...checkedParagraphBorders(incoming, true) };
   }
   const candidate = { ...styles, definitions: { ...styles.definitions, [id]: next } };
-  if (type === 'paragraph') resolvedFormat(styleProperties(candidate, id));
+  if (type === 'paragraph') resolvedFormat(styleProperties(candidate, id), characterUnit(candidate));
   checkedRunFormat(styleRun(candidate, id, candidate.defaults.run, type));
   return next;
 }

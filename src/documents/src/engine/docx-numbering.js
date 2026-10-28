@@ -2,7 +2,7 @@ import { readUnderline } from './docx-underlines.js';
 import { underlinePattern } from './underlines.js';
 import { checkedCapitalization } from './capitalization.js';
 import { readCapitalization } from './docx-capitalization.js';
-import { checkedStrike } from './strikethrough.js';
+import { checkedStrike, strikeDeclarations } from './strikethrough.js';
 import { readStrike } from './docx-strikethrough.js';
 import { readKerning } from './docx-kerning.js';
 import { checkedKerning } from './kerning.js';
@@ -15,7 +15,7 @@ import { readRunVertical } from './docx-vertical-align.js';
 import { readRunBackground } from './docx-backgrounds.js';
 import { parseXml as xml, setContentTypeOverride } from './docx-xml.js';
 import { strToU8 } from 'fflate';
-import { emptyNumbering, NUMBER_FORMATS } from './numbering.js';
+import { emptyNumbering, READ_NUMBER_FORMATS } from './numbering.js';
 import { relatedPartPath } from './docx-relationships.js';
 import { writeFontProperties } from './docx-fonts.js';
 import { LEVEL_PARAGRAPH_ELEMENTS } from './numbering-paragraph.js';
@@ -36,6 +36,13 @@ const integer = (value, fallback, maximum = 2147483647) => {
   return Number(value);
 };
 const on = node => node && !['0', 'false', 'off'].includes(val(node));
+// Level run properties that state no effect on the number (§17.3.2): switched off, or none. Word's
+// Font dialog for a list level writes each option it shows this way. They are ignored and kept.
+const OFF_PROPERTIES = ['vanish', 'outline', 'shadow', 'emboss', 'imprint', 'webHidden', 'specVanish', 'rtl', 'cs', 'oMath'];
+const inertMarkerProperty = n => n.namespaceURI === W && (n.localName === 'noProof'
+  || OFF_PROPERTIES.includes(n.localName) && ['0', 'false', 'off'].includes(val(n))
+  || ['em', 'effect', 'highlight'].includes(n.localName) && val(n) === 'none'
+  || n.localName === 'bdr' && ['none', 'nil'].includes(val(n)));
 // CT_PPrBase order (Part 4 §A.1) of the properties a numbering level's pPr may carry here.
 const LEVEL_PPR_ORDER = ['keepNext', 'keepLines', 'pageBreakBefore', 'widowControl', 'suppressLineNumbers', 'pBdr', 'shd', 'tabs', 'suppressAutoHyphens', 'spacing', 'ind', 'contextualSpacing', 'mirrorIndents', 'jc'];
 const LEVEL_PPR = ['ind', 'tabs', 'contextualSpacing', ...LEVEL_PARAGRAPH_ELEMENTS];
@@ -73,7 +80,7 @@ export function readNumbering(parts, readGeometry, readColor, readFonts, onError
     for (const n of children(node)) if (n.namespaceURI !== W || !['start', 'numFmt', 'lvlRestart', 'pStyle', 'isLgl', 'suff', 'lvlText', 'legacy', 'lvlJc', 'pPr', 'rPr'].includes(n.localName)) throw new Error(`Unsupported numbering property: ${n.localName}.`);
     const format = val(child(node, 'numFmt')) || 'decimal', textNode = child(node, 'lvlText');
     let text = val(textNode) || '';
-    if (!NUMBER_FORMATS.includes(format) || child(node, 'numFmt')?.hasAttributeNS(W, 'format')) throw new Error(`Unsupported numbering format: ${format}.`);
+    if (!READ_NUMBER_FORMATS.includes(format) || child(node, 'numFmt')?.hasAttributeNS(W, 'format')) throw new Error(`Unsupported numbering format: ${format}.`);
     if (['1', 'true', 'on'].includes(textNode?.getAttributeNS(W, 'null')) && !text) throw new Error('Null numbering symbols are not supported.');
     if (text.length > 128 || /[\u0000-\u001f]/u.test(text)) throw new Error('Unsupported numbering label text.');
     const alignment = { start: 'left', end: 'right' }[val(child(node, 'lvlJc'))] || val(child(node, 'lvlJc')) || 'left';
@@ -95,6 +102,7 @@ export function readNumbering(parts, readGeometry, readColor, readFonts, onError
     const paragraph = pPr && readParagraph ? readParagraph(pPr) : {};
     const rPr = child(node, 'rPr'), markerStyle = { ...readFonts?.(rPr) };
     for (const n of children(rPr)) {
+      if (inertMarkerProperty(n)) continue;
       if (n.namespaceURI !== W || !['rFonts', 'lang', 'b', 'i', 'bCs', 'iCs', 'szCs', 'caps', 'smallCaps', 'strike', 'dstrike', 'color', 'sz', 'u', 'shd', 'vertAlign', 'position', 'spacing', 'w', 'kern'].includes(n.localName)) throw new Error(`Unsupported numbering symbol formatting: ${n.localName}.`);
       if (['bCs', 'iCs', 'szCs'].includes(n.localName)) {
         // Private-use glyphs in symbol fonts retain the ordinary run properties;
@@ -340,7 +348,7 @@ export function writeNumbering(parts, numbering) {
     for (const [key, tag] of [['bold', 'b'], ['italic', 'i'], ['capitalization', 'caps'], ['strikethrough', 'strike'], ['color', 'color'], ['characterSpacing', 'spacing'], ['textScale', 'w'], ['kerning', 'kern'], ['baselineShift', 'position'], ['fontSize', 'sz'], ['underline', 'u'], ['shading', 'shd'], ['verticalAlign', 'vertAlign']]) if (key in level.markerStyle || key === 'underline' && ('underlineStyle' in level.markerStyle || 'underlineColor' in level.markerStyle)) {
       const v = level.markerStyle[key];
       if (key === 'capitalization') { checkedCapitalization(v, true); rPr.append(make(v.startsWith('smallCaps') ? 'smallCaps' : 'caps', ['caps', 'smallCaps'].includes(v) ? '1' : '0')); continue; }
-      if (key === 'strikethrough') { checkedStrike(v, true); rPr.append(make(v.startsWith('double') ? 'dstrike' : 'strike', ['single', 'double'].includes(v) ? '1' : '0')); continue; }
+      if (key === 'strikethrough') { checkedStrike(v, true); for (const value of strikeDeclarations(v)) rPr.append(make(value.startsWith('double') ? 'dstrike' : 'strike', ['single', 'double'].includes(value) ? '1' : '0')); continue; }
       if (key === 'underline') { const node = make('u'); if ('underline' in level.markerStyle || 'underlineStyle' in level.markerStyle) node.setAttributeNS(W, 'w:val', underlinePattern(level.markerStyle)); rPr.append(node); continue; }
       rPr.append(make(tag, key === 'shading' ? v === 'foreground' ? 'solid' : 'clear' : ['color', 'verticalAlign', 'textScale'].includes(key) ? v : key === 'characterSpacing' ? Math.round(v * 20) : ['fontSize', 'baselineShift', 'kerning'].includes(key) ? v * 2 : v ? '1' : '0'));
     }
