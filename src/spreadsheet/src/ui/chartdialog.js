@@ -8,7 +8,7 @@ import { el, fieldId, isComposing } from './dom.js';
 import { icon } from './icons.js';
 import { openModal } from './modal.js';
 import { renderChartSvg, seriesColor } from './chartsvg.js';
-import { CHART_DESCRIPTION_MAX_LENGTH, CHART_TYPES, chartData, chartTitles, chartXBounds, chartXBoundsPatch, defaultChart, normalizeChart } from '../core/charts.js';
+import { CHART_DASH_CHOICES, CHART_DESCRIPTION_MAX_LENGTH, CHART_TYPES, chartData, chartTitles, chartXBounds, chartXBoundsPatch, defaultChart, normalizeChart } from '../core/charts.js';
 import { parseRange, rangeName } from '../core/cell.js';
 import { changeSubtypePatch } from '../core/chart-subtypes.js';
 import { chartElementPatch, trendlineAllowed } from '../core/chart-design.js';
@@ -133,6 +133,12 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
   const periodInput = el('input.input', { type: 'number', min: 2, max: 255, step: 1, value: firstTrend?.period || 2, 'aria-label': 'Period' });
   const eqBox = el('input', { type: 'checkbox', checked: !!firstTrend?.dispEq });
   const r2Box = el('input', { type: 'checkbox', checked: !!firstTrend?.dispRSqr });
+  // The trendline's line: its dash (dashed unless chosen) and its width, in points as Excel gives it (kept in px).
+  const trendDashSel = el('select.select', { 'aria-label': 'Trendline line style' }, el('option', { value: 'auto' }, 'Automatic (dashed)'),
+    ...CHART_DASH_CHOICES.map(([value, label]) => el('option', { value }, label)));
+  trendDashSel.value = firstTrend?.dash || 'auto';
+  const trendWidthInput = el('input.input', { type: 'number', min: 0.25, max: 15, step: 0.25, placeholder: 'Auto', 'aria-label': 'Trendline width (pt)',
+    value: firstTrend?.width != null ? Math.round(firstTrend.width * 3 / 4 * 100) / 100 : '' });
   const axis2Box = el('input', { type: 'checkbox', checked: !!draft.secondaryAxis });
   const axis2Field = el('label.check', {}, axis2Box, el('span', {}, 'Line on its own axis (right)'));
   const legendSel = el('select.select', { 'aria-label': 'Legend' },
@@ -206,15 +212,18 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
   const trendLabelFields = el('div.check-group', {}, el('label.check', {}, eqBox, el('span', {}, 'Show equation')), el('label.check', {}, r2Box, el('span', {}, 'Show R² value')));
   const trendRow = el('div.row.row-2', {},
     el('label.field', {}, el('span.field-label', {}, 'Trendline'), trendSel),
-    orderField, periodField, el('div.field', {}, el('span.field-label', {}, 'Trendline label'), trendLabelFields));
+    orderField, periodField, el('div.field', {}, el('span.field-label', {}, 'Trendline label'), trendLabelFields),
+    el('label.field', {}, el('span.field-label', {}, 'Trendline line style'), trendDashSel),
+    el('label.field', {}, el('span.field-label', {}, 'Trendline width (pt)'), trendWidthInput));
   // Only what the kind takes shows: a polynomial's order, a moving average's period, the equation and R² of a fit.
   const syncTrend = () => {
     const kind = trendSel.value;
     orderField.hidden = kind !== 'poly';
     periodField.hidden = kind !== 'movingAvg';
     trendLabelFields.parentNode.hidden = kind === 'none' || kind === 'movingAvg';
+    trendDashSel.parentNode.hidden = trendWidthInput.parentNode.hidden = kind === 'none';
   };
-  for (const input of [trendSel, orderSel, periodInput, eqBox, r2Box]) {
+  for (const input of [trendSel, orderSel, periodInput, eqBox, r2Box, trendDashSel, trendWidthInput]) {
     input.addEventListener('input', () => { trendTouched = true; syncTrend(); });
     input.addEventListener('change', () => { trendTouched = true; syncTrend(); });
   }
@@ -222,7 +231,9 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
   function trendFields(count) {
     if (!trendTouched || trendRow.hidden) return { trendline: !!draft.trendline, trendlines: draft.trendlines };
     if (trendSel.value === 'none') return { trendline: false, trendlines: undefined };
-    const chosen = { type: trendSel.value, order: Number(orderSel.value), period: Number(periodInput.value), dispEq: eqBox.checked, dispRSqr: r2Box.checked };
+    const widthPt = trendWidthInput.value.trim() === '' ? null : Number(trendWidthInput.value);
+    const chosen = { type: trendSel.value, order: Number(orderSel.value), period: Number(periodInput.value), dispEq: eqBox.checked, dispRSqr: r2Box.checked,
+      dash: trendDashSel.value === 'auto' ? undefined : trendDashSel.value, width: widthPt == null ? undefined : Math.round(widthPt * 4 / 3 * 100) / 100 };
     return { trendline: true, trendlines: Array.from({ length: Math.max(1, count, draft.trendlines?.length || 0) }, (_, j) => normalizeTrend({ ...(trendFor(draft, j) || {}), ...chosen })) };
   }
   const labelsField = el('label.check', {}, labelsBox, el('span', {}, 'Show values'));
@@ -235,7 +246,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     el('label.field', {}, el('span.field-label', {}, 'Vertical axis title'), yTitleInput), y2TitleField);
 
   // The fields a problem can be laid at; the message names it and the field at fault is marked and focused.
-  const checkedFields = [rangeInput, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput, periodInput, ...sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])];
+  const checkedFields = [rangeInput, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput, periodInput, trendWidthInput, ...sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])];
   /** Reads the form into the draft; null, or { msg, fields } for what stops the chart. */
   function readForm() {
     const problem = (msg, ...fields) => ({ msg, fields });
@@ -311,6 +322,8 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     draft.bins = binsOk ? bins : null;
     const period = Number(periodInput.value);
     if (!trendRow.hidden && trendSel.value === 'movingAvg' && !(Number.isInteger(period) && period >= 2 && period <= 255)) return problem('The period must be a whole number from 2 to 255', periodInput);
+    const trendWidth = trendWidthInput.value.trim() === '' ? null : Number(trendWidthInput.value);
+    if (!trendRow.hidden && trendSel.value !== 'none' && trendWidth != null && !(trendWidth >= 0.25 && trendWidth <= 15)) return problem('The trendline width must be from 0.25 to 15 pt', trendWidthInput);
     return null;
   }
 
@@ -359,7 +372,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
   let redraw = 0;
   const refreshSoon = () => { clearTimeout(redraw); redraw = setTimeout(refresh, 150); };
   for (const input of sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])) input.addEventListener('input', refreshSoon);
-  for (const input of [rangeInput, seriesSel, headersSel, stackedBox, stack100Box, trendSel, orderSel, periodInput, eqBox, r2Box, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput]) input.addEventListener('input', refresh);
+  for (const input of [rangeInput, seriesSel, headersSel, stackedBox, stack100Box, trendSel, orderSel, periodInput, eqBox, r2Box, trendDashSel, trendWidthInput, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput]) input.addEventListener('input', refresh);
   for (const input of [titleInput, descriptionInput, xTitleInput, yTitleInput, y2TitleInput]) input.addEventListener('input', refreshSoon);
   for (const input of [seriesSel, headersSel, stackedBox, stack100Box, trendSel, orderSel, eqBox, r2Box, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox]) input.addEventListener('change', refresh);
 

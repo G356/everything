@@ -12,7 +12,7 @@ import { icon } from './icons.js';
 import { activeChart, isChartObject, ringCountOf, seriesCountOf } from './chart-actions.js';
 import { chartElementKeys, elementLabel } from './chart-ribbon.js';
 import { seriesColor } from './chartsvg.js';
-import { chartData, chartTitles, chartXBounds, chartXBoundsPatch, CHART_DISPLAY_UNITS } from '../core/charts.js';
+import { chartData, chartTitles, chartXBounds, chartXBoundsPatch, CHART_DASH_CHOICES, CHART_DISPLAY_UNITS } from '../core/charts.js';
 import { chartElementPatch, dataLabelPositions, elementFormatPatch, isPieChart, trendlineAllowed, trendlinePatch } from '../core/chart-design.js';
 import { INTERCEPT_TYPES, TREND_TYPES, trendFor, trendName, trendProblem } from '../core/trendline.js';
 import { barSpacing } from '../core/chart-subtypes.js';
@@ -393,7 +393,7 @@ export function createChartUi(ctx) {
       choice('Line', t.color ? 'solid' : 'auto', [['auto', 'Automatic'], ['solid', 'Solid line']], v => set({ color: v === 'solid' ? t.color || seriesColor(chart, j) : undefined })),
       t.color ? color('Line Color', t.color, v => set({ color: v })) : null,
       number('Width (pt)', Math.round((t.width ?? 1.5) * 3 / 4 * 100) / 100, v => { if (v != null && v >= 0.25 && v <= 15) set({ width: Math.round(v * 4 / 3 * 100) / 100 }); }, { min: 0.25, max: 15, step: 0.25, placeholder: '' }),
-      choice('Dash type', t.dash || 'auto', [['auto', 'Automatic'], ['solid', 'Solid'], ['sysDot', 'Round Dot'], ['sysDash', 'Square Dot'], ['dash', 'Dash'], ['dashDot', 'Dash Dot'], ['lgDash', 'Long Dash']],
+      choice('Dash type', t.dash || 'auto', [['auto', 'Automatic'], ...CHART_DASH_CHOICES],
         v => set({ dash: v === 'auto' ? undefined : v })))];
   }
 
@@ -506,7 +506,7 @@ export function createChartUi(ctx) {
       }
       if (lineLike && line) {
         fields.push(checkbox('Smoothed line', line.smooth ?? chart.smooth, on => setLine({ smooth: on })),
-          choice('Dash type', line.dash || 'solid', [['solid', 'Solid'], ['sysDot', 'Round Dot'], ['sysDash', 'Square Dot'], ['dash', 'Dash'], ['dashDot', 'Dash Dot'], ['lgDash', 'Long Dash']],
+          choice('Dash type', line.dash || 'solid', CHART_DASH_CHOICES,
             v => setLine({ dash: v === 'solid' ? undefined : v })),
           el('h3.chart-pane-sub', {}, 'Marker'),
           choice('Marker', line.marker === false ? 'none' : line.markerSymbol || 'circle', [['none', 'None'], ['circle', 'Circle'], ['square', 'Square'], ['diamond', 'Diamond'], ['triangle', 'Triangle'], ['x', 'X'], ['plus', 'Plus'], ['star', 'Star'], ['dash', 'Dash']],

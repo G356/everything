@@ -77,6 +77,9 @@ const CHART_MARKER_SYMBOLS = ['auto', 'circle', 'dash', 'diamond', 'dot', 'none'
 export const CHART_LINE_DASHES = Object.freeze({ solid: [], dot: [1, 3], dash: [4, 3], lgDash: [8, 3],
   dashDot: [4, 3, 1, 3], lgDashDot: [8, 3, 1, 3], lgDashDotDot: [8, 3, 1, 3, 1, 3],
   sysDash: [3, 1], sysDot: [1, 1], sysDashDot: [3, 1, 1, 1], sysDashDotDot: [3, 1, 1, 1, 1, 1] });
+// The dashes a line can be given, named and ordered as Excel's Dash type menu lists them.
+export const CHART_DASH_CHOICES = Object.freeze([['solid', 'Solid'], ['sysDot', 'Round Dot'], ['sysDash', 'Square Dot'], ['dash', 'Dash'],
+  ['dashDot', 'Dash Dot'], ['lgDash', 'Long Dash'], ['lgDashDot', 'Long Dash Dot'], ['lgDashDotDot', 'Long Dash Dot Dot']]);
 
 export const CHART_DISPLAY_UNITS = Object.freeze({ hundreds: 1e2, thousands: 1e3, tenThousands: 1e4, hundredThousands: 1e5,
   millions: 1e6, tenMillions: 1e7, hundredMillions: 1e8, billions: 1e9, trillions: 1e12 });

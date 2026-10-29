@@ -86,3 +86,41 @@ it('keeps each series\' own trendline when the edit leaves the trendline alone, 
   expect(wb.chartById(id, chartId).trendline).toBe(false);
   expect(wb.chartById(id, chartId).trendlines).toBeUndefined();
 });
+
+// Issue #143: the trendline was always dashed, with no way from the chart dialog to make it dotted, solid or thicker.
+it('sets the trendline line style and width from the chart dialog', () => {
+  // A browser fires input and then change as a select or number field is set.
+  const set = (input, value) => { input.value = value; input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true })); };
+  const { wb, id } = sheet();
+  openChartDialog(ctxFor(wb, id, { r1: 0, c1: 0, r2: 4, c2: 2 }));
+  document.querySelector('[data-type="scatter"]').click();
+  expect(field('Trendline line style').closest('label').hidden).toBe(true);
+  set(field('Trendline'), 'linear');
+  expect(field('Trendline line style').closest('label').hidden).toBe(false);
+  expect(preview()).toContain('stroke-dasharray="5 4"');
+  set(field('Trendline line style'), 'sysDot');
+  set(field('Trendline width (pt)'), '3');
+  // 3 pt is 4 px; a round dot is as long as the line is wide.
+  expect(document.querySelector('.chart-preview .chart-trendline').getAttribute('stroke-dasharray')).toBe('4 4');
+  document.querySelector('form').requestSubmit();
+  for (const t of wb.sheet(id).charts[0].trendlines) expect(t).toMatchObject({ type: 'linear', dash: 'sysDot', width: 4 });
+
+  // Reopened, the dialog shows the line as the chart keeps it; Solid draws no dashes.
+  closeAllModals();
+  openChartDialog(ctxFor(wb, id, null), { chart: wb.sheet(id).charts[0] });
+  expect(field('Trendline line style').value).toBe('sysDot');
+  expect(field('Trendline width (pt)').value).toBe('3');
+  set(field('Trendline line style'), 'solid');
+  expect(document.querySelector('.chart-preview .chart-trendline').hasAttribute('stroke-dasharray')).toBe(false);
+});
+
+it('turns down a trendline width out of range', () => {
+  const { wb, id } = sheet();
+  openChartDialog(ctxFor(wb, id, { r1: 0, c1: 0, r2: 4, c2: 2 }));
+  document.querySelector('[data-type="line"]').click();
+  pick(field('Trendline'), 'linear');
+  pick(field('Trendline width (pt)'), '40');
+  document.querySelector('form').requestSubmit();
+  expect(wb.sheet(id).charts).toHaveLength(0);
+  expect(document.body.textContent).toContain('The trendline width must be from 0.25 to 15 pt');
+});
