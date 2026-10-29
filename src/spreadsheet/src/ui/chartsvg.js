@@ -13,6 +13,7 @@ import { wrapLines } from '../core/textfit.js';
 import { SPECIAL_CHART_TYPES, renderSpecialChart, renderWaterfall } from './chartsvg-special.js';
 import { fitTrend, trendEquation, trendEquationText, trendFor, trendName, trendPoints, trendRSquaredText } from '../core/trendline.js';
 import { ERROR_BAR_COLOR, errorBarExtents, errorBarsFor, errorBarsSvg } from '../core/error-bars.js';
+import { axisTickValuesIn } from '../core/axis-tick-values.js';
 
 // The light theme's --series-* tokens in tokens.css, in order: every fill reads at 3:1 on white.
 export const SERIES_COLORS = ['#337bfc', '#eb6834', '#0f8f61', '#b57a00', '#c4417a', '#4a3aa7', '#0e7490', '#8a5a00', '#918f88'];
@@ -1161,7 +1162,9 @@ function renderStyledCartesian(data, chart, width, height) {
   const values = [...(stacked ? stacks.flatMap(points => points.filter(Boolean).map(p => p.to)) : []),
     ...series.flatMap((s, i) => (stacked && i < columnCount) || (secondary && i === series.length - 1) ? []
       : areaStacks[i] ? areaStacks[i].filter(Boolean).map(p => p.to) : bubble ? bubbles[i].map(p => p.y) : s.values.filter(Number.isFinite)),
-    ...errors.flatMap(b => b.y.flatMap(e => [e.low, e.high]))];
+    ...errors.flatMap(b => b.y.flatMap(e => [e.low, e.high])),
+    // Custom tick values widen an automatic bound to reach them; a fixed bound leaves out those beyond it.
+    ...(a.yTickValues || [])];
   const percentAxis = percent || (pureArea || stackedLine) && chart.stack100 || layered && series.every((_, i) => areaStacks[i] && a.seriesGroups[i]?.grouping === 'percentStacked');
   const axisScale = (values, options) => {
     // Out-of-range label helpers must not determine an automatic bound.
@@ -1170,7 +1173,7 @@ function renderStyledCartesian(data, chart, width, height) {
   };
   const primaryOptions = { min: chart.yMin, max: chart.yMax, step: a.yStep, ticks: 9, numeric: numericX, percent: percentAxis };
   const secondaryOptions = { min: a.y2Min, max: a.y2Max, step: a.y2Step, ticks: 10 };
-  const secondValues = secondary ? series.at(-1).values.filter(Number.isFinite) : [];
+  const secondValues = secondary ? [...series.at(-1).values.filter(Number.isFinite), ...(a.y2TickValues || [])] : [];
   let categoryScale = axisScale(values, primaryOptions);
   let scale = categoryScale, scale2 = axisScale(secondValues, secondaryOptions);
   if (secondary && a.hideYAxis !== a.hideY2Axis) {
@@ -1274,7 +1277,7 @@ function renderStyledCartesian(data, chart, width, height) {
   const dates = a.dateAxis && !numericX ? chartDateAxis(dateValues, {
     min: a.xMin, max: a.xMax, baseUnit: a.xBaseTimeUnit, between: a.categoryBetween !== false,
   }) : null;
-  const xInBounds = dateValues.filter(v => Number.isFinite(v) && (a.xMin == null || v >= a.xMin) && (a.xMax == null || v <= a.xMax));
+  const xInBounds = [...dateValues, ...(numericX ? a.xTickValues || [] : [])].filter(v => Number.isFinite(v) && (a.xMin == null || v >= a.xMin) && (a.xMax == null || v <= a.xMax));
   const xScale = !numericX ? null : a.xLogBase > 1 ? logScale(xInBounds, a.xLogBase, { min: a.xMin, max: a.xMax, step: a.xStep })
     : chartAxisScale(minOf(xInBounds), maxOf(xInBounds), { min: a.xMin, max: a.xMax, step: a.xStep, ticks: 7, numeric: true });
   const xMin = numericX ? xScale.min : dates ? dates.min : layered ? 1 : 0;
@@ -1316,7 +1319,11 @@ function renderStyledCartesian(data, chart, width, height) {
   const primarySource = (secondary ? series.slice(0, -1) : series).find(s => s.style)?.style || null;
   const secondarySource = secondary ? series.at(-1).style || null : null;
   // A logarithmic axis's ticks differ by a factor: each is labelled to its own decimals.
-  const stepOf = (domain, v) => (domain.log ? v : domain.step);
+  // So is a custom tick value (Format Axis ▸ Custom values), which need not sit on any step.
+  const stepOf = (domain, v) => (domain.log || a.yTickValues ? v : domain.step);
+  // An axis's major ticks: its custom values within its bounds, or else steps of its major unit.
+  const primaryMajor = () => axisTickValuesIn(a.yTickValues, scale) ?? axisTicks(scale);
+  const secondaryMajor = () => axisTickValuesIn(a.y2TickValues, scale2) ?? scaleTicks(scale2);
   const formatted = (v, code, step, units, source = null) => {
     const divisor = units?.divisor || 1;
     if (!code && source?.fmt === 'custom') code = source.code;
@@ -1330,7 +1337,7 @@ function renderStyledCartesian(data, chart, width, height) {
     // automatic bounds with the new unit so headroom still has a labeled tick.
     {
       while (true) {
-        const ticks = axisTicks(scale);
+        const ticks = primaryMajor();
         const widths = ticks.map(v => axisTextWidth(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), stepOf(scale, v), a.yUnits, primarySource).trim(), a.yStyle));
         // Centered end labels need space outside the plot. Solve each edge's
         // movement by its fractional contribution to the label position, as
@@ -1345,7 +1352,7 @@ function renderStyledCartesian(data, chart, width, height) {
         const available = Math.max(0, plot.w - 10), total = left + right;
         if (total > available) { left *= available / total; right *= available / total; }
         plot.x += left; plot.w -= left + right;
-        if (a.yStep > 0 || scale.log) break;
+        if (a.yStep > 0 || scale.log || a.yTickValues) break;
         const crowded = ticks.some((v, i) => i > 0 && Math.abs(valueX(v) - valueX(ticks[i - 1]))
           < (widths[i - 1] + widths[i]) / 2 + a.yStyle.size / 2);
         if (!crowded) break;
@@ -1355,7 +1362,7 @@ function renderStyledCartesian(data, chart, width, height) {
       }
       categoryCrossing = crossingValue(crossings.x, scale.min, scale.max, zeroOf(scale));
     }
-    const texts = axisTicks(scale).map(v => formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), stepOf(scale, v), a.yUnits, primarySource).trim()).filter(Boolean);
+    const texts = primaryMajor().map(v => formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), stepOf(scale, v), a.yUnits, primarySource).trim()).filter(Boolean);
     if (texts.length) {
       const boxes = texts.map(t => categoryTextLayout(t, a.yStyle, Infinity, 'none'));
       const ascent = Math.max(...boxes.map(b => b.ascent)), descent = Math.max(...boxes.map(b => b.height - b.ascent));
@@ -1373,10 +1380,10 @@ function renderStyledCartesian(data, chart, width, height) {
       bottom = plot.y + plot.h;
     }
   }
-  const primaryLabelWidth = !horizontal && valueLabels ? Math.max(0, ...axisTicks(scale).map(v =>
+  const primaryLabelWidth = !horizontal && valueLabels ? Math.max(0, ...primaryMajor().map(v =>
     axisTextWidth(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), stepOf(scale, v), a.yUnits, primarySource).trim(), a.yStyle))) : 0;
-  const secondaryLabelWidth = secondaryLabels ? Math.max(0, ...scaleTicks(scale2).map(v =>
-    axisTextWidth(formatted(v, a.y2Format, scale2.step, a.y2Units, secondarySource).trim(), a.y2Style))) : 0;
+  const secondaryLabelWidth = secondaryLabels ? Math.max(0, ...secondaryMajor().map(v =>
+    axisTextWidth(formatted(v, a.y2Format, a.y2TickValues ? v : scale2.step, a.y2Units, secondarySource).trim(), a.y2Style))) : 0;
   const primaryTitleSpace = !horizontal && chart.yTitle ? a.yStyle.size * 1.6 : 0;
   const secondaryTitleSpace = secondary && chart.y2Title ? a.y2Style.size * 1.6 : 0;
   const valueLabelColumns = () => {
@@ -1418,9 +1425,11 @@ function renderStyledCartesian(data, chart, width, height) {
   const xStep = dates || numericX ? xScale?.step || a.xStep || (dates && a.xTimeUnit !== 'days' ? 1
     : Math.max(1, niceScale(dates ? dates.unitOf(xMin) : xMin, dates ? dates.unitOf(xMax) : xMax,
       Math.max(2, Math.floor((horizontal ? plot.h : plot.w) / 130))).step)) : 1;
-  const xTicks = dates ? dates.ticks(xStep, a.xTimeUnit) : numericX ? axisTicks({ min: xMin, max: xMax, step: xStep, log: xScale.log }) : [];
+  const customX = numericX ? a.xTickValues : null;
+  const xTicks = dates ? dates.ticks(xStep, a.xTimeUnit) : numericX ? axisTickValuesIn(customX, { min: xMin, max: xMax, log: xScale.log })
+    ?? axisTicks({ min: xMin, max: xMax, step: xStep, log: xScale.log }) : [];
   const dateMajor = dates?.ticks(xStep, a.xTimeUnit, true);
-  const categoryTexts = dates || numericX ? xTicks.map(v => formatted(v, a.xFormat, xScale?.log ? v : xStep, numericX ? a.xUnits : null, data.xStyle)) : data.categories.map((text, i) =>
+  const categoryTexts = dates || numericX ? xTicks.map(v => formatted(v, a.xFormat, xScale?.log || customX ? v : xStep, numericX ? a.xUnits : null, data.xStyle)) : data.categories.map((text, i) =>
     a.xFormat && !a.xSourceLinked && data.categoryValues?.[i] != null ? formatValue(data.categoryValues[i], { fmt: 'custom', code: a.xFormat }) : text);
   let categoryLayouts = categoryTexts.map(c => categoryTextLayout(c, a.xStyle,
     dates || numericX ? Infinity : labelWidthLimit(a.xRotation, !horizontal), a.xWrap));
@@ -1554,6 +1563,15 @@ function renderStyledCartesian(data, chart, width, height) {
         <= Math.max(Math.min(step, major.step) * 1e-8, Number.EPSILON * Math.max(Math.abs(v), Math.abs(t))));
     });
   };
+  // Beside custom values the minor ticks keep to the automatic grid, its major places included,
+  // except where a custom value already stands.
+  const minorAround = (key, major, ticks, custom, auto) => {
+    if (!custom) return minorTicks(key, major, ticks);
+    const grid = auto(major), minor = minorTicks(key, major, grid);
+    if (!minor.length) return [];
+    const slack = Math.abs(major.max - major.min) * 1e-9;
+    return [...grid, ...minor].filter(v => !ticks.some(t => Math.abs(v - t) <= slack)).sort((p, q) => p - q);
+  };
   const axis = (key, vertical, origin, start, end, major, minor, hidden) => {
     const style = a.axisStyles?.[key];
     if (!style || hidden || style.color === 'none') return;
@@ -1576,7 +1594,7 @@ function renderStyledCartesian(data, chart, width, height) {
     ticks(major, style.majorTick, 5, 'major');
     ticks(minor, style.minorTick, 3, 'minor');
   };
-  const primaryTicks = axisTicks(scale), secondaryTicks = secondary ? scaleTicks(scale2) : [];
+  const primaryTicks = primaryMajor(), secondaryTicks = secondary ? secondaryMajor() : [];
   const tickSkip = a.axisStyles?.x?.tickSkip || 1;
   const categoryTicks = offset => !a.axisStyles?.x || dates || numericX || !n ? [] : Array.from({
     length: Math.min(5001, Math.max(0, Math.floor(((between ? n : n - 1) - offset) / tickSkip) + 1)),
@@ -1588,17 +1606,18 @@ function renderStyledCartesian(data, chart, width, height) {
   const xOrigin = horizontal ? plot.x + crossingFraction * plot.w : bottom - crossingFraction * plot.h;
   axis('x', horizontal, xOrigin, horizontal ? plot.y : plot.x, horizontal ? bottom : plot.x + plot.w,
     dates ? dateMajor.map(v => datePosition(v, true)) : numericX ? xTicks.map(sx) : categoryMajor,
-    dates || numericX ? minorTicks('x', { min: xMin, max: xMax, step: xStep, log: xScale?.log }, dateMajor || xTicks, !!dates)
-      .map(v => dates ? datePosition(v, true) : sx(v)) : categoryMinor, a.hideXAxis);
+    dates ? minorTicks('x', { min: xMin, max: xMax, step: xStep }, dateMajor, true).map(v => datePosition(v, true))
+      : numericX ? minorAround('x', { min: xMin, max: xMax, step: xStep, log: xScale?.log }, xTicks, customX, axisTicks)
+      .map(sx) : categoryMinor, a.hideXAxis);
   if (!horizontal && !a.hideXAxis && !a.axisStyles?.x) parts.push(`<line x1="${f(plot.x)}" y1="${f(xOrigin)}" x2="${f(plot.x + plot.w)}" y2="${f(xOrigin)}" stroke="${esc(a.xStyle.color)}" stroke-opacity=".1" stroke-width=".5"/>`);
   const yOrigin = valueAxisOrigin(crossings.y, valueAxisHigh);
   const y2Origin = valueAxisOrigin(crossings.y2 ?? 'max', secondAxisHigh);
   const valueColumns = valueLabelColumns();
   const valueLabelOrigin = fixedLabelSide(a.yLabelPosition) ? horizontal ? valueHigh ? plot.y : bottom : valueHigh ? plot.x + plot.w : plot.x : yOrigin;
   axis('y', !horizontal, yOrigin, horizontal ? plot.x : plot.y, horizontal ? plot.x + plot.w : bottom,
-    primaryTicks.map(horizontal ? valueX : sy), minorTicks('y', scale, primaryTicks).map(horizontal ? valueX : sy), a.hideYAxis);
+    primaryTicks.map(horizontal ? valueX : sy), minorAround('y', scale, primaryTicks, a.yTickValues, axisTicks).map(horizontal ? valueX : sy), a.hideYAxis);
   if (secondary) axis('y2', true, y2Origin, plot.y, bottom,
-    secondaryTicks.map(sy2), minorTicks('y2', scale2, secondaryTicks).map(sy2), a.hideY2Axis);
+    secondaryTicks.map(sy2), minorAround('y2', scale2, secondaryTicks, a.y2TickValues, scaleTicks).map(sy2), a.hideY2Axis);
   if (a.xGridlines ?? (bubble?.xGrid && chart.gridlines)) {
     if (dates) for (const v of dateMajor) {
       const position = datePosition(v, true);
@@ -1635,7 +1654,7 @@ function renderStyledCartesian(data, chart, width, height) {
   }
   if (secondary) for (const v of secondaryTicks) {
     if (a.y2Gridlines) gridline('y2', plot.x, sy2(v), plot.x + plot.w, sy2(v));
-    if (secondaryLabels) label(formatted(v, a.y2Format, scale2.step, a.y2Units, secondarySource).trim(), valueColumns.secondary.x, sy2(v) + a.y2Style.size * .35, a.y2Style, secondHigh ? 'start' : 'end', 'data-el="y2Axis"');
+    if (secondaryLabels) label(formatted(v, a.y2Format, a.y2TickValues ? v : scale2.step, a.y2Units, secondarySource).trim(), valueColumns.secondary.x, sy2(v) + a.y2Style.size * .35, a.y2Style, secondHigh ? 'start' : 'end', 'data-el="y2Axis"');
   }
   if (horizontal) {
     if (categoryLabels) {

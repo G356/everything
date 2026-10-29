@@ -17,6 +17,7 @@ import { chartElementPatch, dataLabelPositions, elementFormatPatch, isPieChart, 
 import { INTERCEPT_TYPES, TREND_TYPES, trendFor, trendName, trendProblem } from '../core/trendline.js';
 import { ERROR_BAR_CAP_WIDTH, ERROR_BAR_COLOR, ERROR_BAR_TYPES, errorBarAmountInput, errorBarsAllowed, errorBarsFor, errorBarsPatch, normalizeErrorBars } from '../core/error-bars.js';
 import { barSpacing } from '../core/chart-subtypes.js';
+import { formatAxisTickValues, parseAxisTickValues } from '../core/axis-tick-values.js';
 
 const PANE_TITLES = { chartArea: 'Format Chart Area', plotArea: 'Format Plot Area', title: 'Format Chart Title', legend: 'Format Legend',
   xAxis: 'Format Axis', yAxis: 'Format Axis', y2Axis: 'Format Axis', xTitle: 'Format Axis Title', yTitle: 'Format Axis Title',
@@ -504,12 +505,29 @@ export function createChartUi(ctx) {
       const setBound = (k, v) => apply(k === 'yMin' || k === 'yMax' ? { [k]: v } : k === 'xMin' ? chartXBoundsPatch(chart, v, xb.max)
         : k === 'xMax' ? chartXBoundsPatch(chart, xb.min, v) : { appearance: { ...a, [k]: v } });
       const units = a?.[`${y}Units`]?.builtIn || 'none';
+      // Custom values: ticks only where they are listed, written like pages to print (1, 2, 5-8).
+      const tickValues = () => {
+        const k = `${y}TickValues`;
+        const input = el('input.input', { type: 'text', value: formatAxisTickValues(a[k]), placeholder: 'Auto', 'aria-label': 'Custom values' });
+        const note = el('p.chart-pane-note', { role: 'alert', hidden: true });
+        input.addEventListener('change', () => {
+          const result = parseAxisTickValues(input.value);
+          note.hidden = !result.error;
+          note.textContent = result.error || '';
+          if (result.error) return;
+          const next = { ...a };
+          if (result.values) next[k] = result.values; else delete next[k];
+          apply({ appearance: next }, 'Set axis values');
+        });
+        return [field('Custom values', input), note, el('p.chart-pane-note', {}, 'Ticks go only at these values, like 1, 2, 5, 8, 12 or 1-5. Leave it empty for automatic ticks.')];
+      };
       out.push(section('Axis Options',
         el('h3.chart-pane-sub', {}, 'Bounds'),
         number('Minimum', get(minKey), v => { const max = get(maxKey); if (v == null || max == null || v < max) setBound(minKey, v); }),
         number('Maximum', get(maxKey), v => { const min = get(minKey); if (v == null || min == null || v > min) setBound(maxKey, v); }),
         a ? el('h3.chart-pane-sub', {}, 'Units') : null,
         a ? number('Major', a[stepKey], v => { if (v == null || v > 0) apply({ appearance: { ...a, [stepKey]: v } }); }) : null,
+        full ? tickValues() : null,
         full ? choice('Display units', units, [['none', 'None'], ...Object.keys(CHART_DISPLAY_UNITS).map(u => [u, u.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase())])],
           v => { const next = { ...a }; const k = `${y}Units`; if (v === 'none') delete next[k]; else next[k] = { builtIn: v, divisor: CHART_DISPLAY_UNITS[v], label: '', style: a[second ? 'y2Style' : 'yStyle'], layout: null, rotation: 0 }; apply({ appearance: next }); }) : null,
         full && !second && !chart.stack100 ? checkbox('Logarithmic scale', a[logKey] > 1, on => { const next = { ...a }; if (on) next[logKey] = 10; else delete next[logKey]; apply({ appearance: next }); }) : null,

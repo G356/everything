@@ -252,7 +252,7 @@ export function chartStylePatch(chart, id, { seriesCount = 1 } = {}) {
   const fresh = excelChartAppearance(subtype, { font });
   // Elements the user added stay, and so do the axes' scales (Format Axis); only their look changes.
   const keep = ['lines', 'lineDefault', 'dataTable', 'hideXAxis', 'hideYAxis', 'hideY2Axis', 'xGridlines', 'yFormat', 'xFormat', 'y2Format', 'yStep', 'xStep', 'y2Step',
-    'yUnits', 'xUnits', 'y2Units', 'yLogBase', 'xLogBase', 'xMin', 'xMax', 'y2Min', 'y2Max', 'reverseValues', 'reverseCategories', 'reverseSecondaryValues',
+    'yUnits', 'xUnits', 'y2Units', 'yLogBase', 'xLogBase', 'yTickValues', 'xTickValues', 'y2TickValues', 'xMin', 'xMax', 'y2Min', 'y2Max', 'reverseValues', 'reverseCategories', 'reverseSecondaryValues',
     'axisCrossings', 'dateAxis', 'xBaseTimeUnit', 'xTimeUnit', 'blanks', 'plot', 'title', 'legend', 'legendPos', 'legendHidden', 'pointColors', 'seriesTypes', 'seriesGroups'];
   const a = { ...fresh, ...Object.fromEntries(keep.filter(k => old[k] !== undefined).map(k => [k, old[k]])) };
   // A chart in the app's own style kept its x bounds on itself; its new appearance keeps them now.

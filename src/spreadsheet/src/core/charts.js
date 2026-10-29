@@ -2,6 +2,7 @@ import { normalizeCellAnchor } from './drawing-cell-anchor.js';
 import { linkedChartText, normalizeLinkedChartText } from './chart-linked-text.js';
 import { normalizeTrendlines } from './trendline.js';
 import { errorBarValues, legacyBubbleErrorBars, normalizeErrorBars } from './error-bars.js';
+import { normalizeAxisTickValues } from './axis-tick-values.js';
 /**
  * Charts: the model of a chart placed on a sheet, and the pure step that
  * turns a range of cells into categories and series for drawing.
@@ -619,6 +620,8 @@ function normalizeAppearance(raw) {
     // A logarithmic value axis (and a scatter chart's x axis): its base, 2 to 1000 as DrawingML allows.
     ...(Number.isFinite(raw.yLogBase) && raw.yLogBase >= 2 && raw.yLogBase <= 1000 ? { yLogBase: raw.yLogBase } : {}),
     ...(Number.isFinite(raw.xLogBase) && raw.xLogBase >= 2 && raw.xLogBase <= 1000 ? { xLogBase: raw.xLogBase } : {}),
+    // Custom tick values (Format Axis ▸ Custom values), drawn instead of steps of the major unit.
+    ...Object.fromEntries(['yTickValues', 'xTickValues', 'y2TickValues'].map(k => [k, normalizeAxisTickValues(raw[k])]).filter(([, v]) => v)),
     ...(raw.xSourceLinked === true ? { xSourceLinked: true } : {}),
     xFormat: typeof raw.xFormat === 'string' ? raw.xFormat.slice(0, 512) : '', yFormat: typeof raw.yFormat === 'string' ? raw.yFormat.slice(0, 512) : '',
     gapWidth: n(raw.gapWidth, 0, 500, 150),

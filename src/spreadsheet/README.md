@@ -135,7 +135,10 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   deviations, the standard error, or per-point amounts read live from cells,
   with their own direction, end caps, cap width, color, width and dash, kept
   in .xlsx files), a color of your choice per series, the legend below, above, or
-  beside the plot, fixed axis bounds, gridlines that can be turned off,
+  beside the plot, fixed axis bounds, custom tick values on a value axis
+  (listed like pages to print, such as 1, 2, 5-8, on linear and logarithmic
+  axes; Excel has no such setting, so .xlsx files keep its automatic ticks),
+  gridlines that can be turned off,
   smooth curves for line and area charts, and axis and value labels in the
   data's currency, percent, or date format (large values read as K, M, B,
   and T), floating over the sheet; a chart's menu duplicates it, copies it to the clipboard as a picture, or downloads it as PNG or SVG. Drag to
