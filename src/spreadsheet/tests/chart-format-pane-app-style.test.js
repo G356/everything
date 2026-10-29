@@ -36,18 +36,19 @@ async function mount(type) {
   return { wb, chart: () => wb.chartById(id, chartId), pane, open };
 }
 
-it('offers no x bounds on a scatter chart in the app\'s style, which would restyle the whole chart', async () => {
+it('offers x bounds on a scatter chart in the app\'s style without restyling the chart', async () => {
   const { chart, pane, open } = await mount('scatter');
   await open('xAxis');
   expect(pane.hidden).toBe(false);
-  expect(pane.querySelector('input[aria-label="Minimum"]')).toBeNull();
-  expect(pane.textContent).toContain('Change Chart Type gives it the full formatting options');
+  const xMin = pane.querySelector('input[aria-label="Minimum"]');
+  xMin.value = '2'; xMin.dispatchEvent(new Event('change')); await flush();
+  expect(chart()).toMatchObject({ xMin: 2, yMin: null });
   expect(chart().appearance).toBeUndefined();
-  // The value axis keeps its bounds, which this style draws.
+  // The value axis keeps its own bounds.
   await open('yAxis');
   const min = pane.querySelector('input[aria-label="Minimum"]');
   min.value = '2'; min.dispatchEvent(new Event('change')); await flush();
-  expect(chart()).toMatchObject({ yMin: 2 });
+  expect(chart()).toMatchObject({ yMin: 2, xMin: 2 });
   expect(chart().appearance).toBeUndefined();
 });
 

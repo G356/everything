@@ -6,7 +6,7 @@ import { chartDateAxis } from '../core/chart-date-axis.js';
  * preview). Colors are CSS variables so charts follow the theme.
  */
 
-import { authoredBarGapWidth, chartPointStyle, niceScale, axisLabel, histogramBins, waterfallSteps, dateKindOf, CHART_LINE_DASHES } from '../core/charts.js';
+import { authoredBarGapWidth, chartXBounds, chartPointStyle, niceScale, axisLabel, histogramBins, waterfallSteps, dateKindOf, CHART_LINE_DASHES } from '../core/charts.js';
 import { formatValue, formatGeneral, fontStack, numFmtToStyle } from '../core/format.js';
 import { maxOf, minOf } from '../core/numeric.js';
 import { wrapLines } from '../core/textfit.js';
@@ -629,7 +629,9 @@ function renderChartContent(data, chart, width, height) {
   // Histogram counts and waterfall extents retain their chart-specific scale.
   // Ordinary Cartesian charts use the shared automatic range policy below.
   if ((isHistogram || wf) && !dateKindOf(vs)) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
-  const fixedBounds = chart.yMin != null || chart.yMax != null;
+  // A scatter chart's x axis may have fixed bounds too (Format Axis, Edit chart); marks past them are left out.
+  const xBounds = isScatter ? chartXBounds(chart) : { min: null, max: null };
+  const fixedBounds = chart.yMin != null || chart.yMax != null || xBounds.min != null || xBounds.max != null;
   let yLo = chart.yMin ?? lo;
   let yHi = chart.yMax ?? hi;
   if (!(yHi > yLo)) {
@@ -656,12 +658,12 @@ function renderChartContent(data, chart, width, height) {
   const xStyle = isScatter ? data.xStyle || null : null; // the x column's own format: dates read as dates
   let xScale = null;
   if (isScatter) {
-    const finite = xs.filter((v) => v != null);
-    xScale = chartAxisScale(minOf(finite), maxOf(finite), { ticks: 6, numeric: true });
+    const finite = xs.filter((v) => v != null && (xBounds.min == null || v >= xBounds.min) && (xBounds.max == null || v <= xBounds.max));
+    xScale = chartAxisScale(minOf(finite), maxOf(finite), { min: xBounds.min, max: xBounds.max, ticks: 6, numeric: true });
     if (dateKindOf(xStyle) === 'date' && xScale.step < 1) {
       xScale.step = 1;
-      xScale.min = Math.floor(xScale.min);
-      xScale.max = Math.max(Math.ceil(xScale.max), xScale.min + 1);
+      if (xBounds.min == null) xScale.min = Math.floor(xScale.min);
+      if (xBounds.max == null) xScale.max = Math.max(Math.ceil(xScale.max), xScale.min + 1);
     }
   }
 
@@ -776,7 +778,7 @@ function renderChartContent(data, chart, width, height) {
       const color = seriesPaint(chart, si);
       s.values.forEach((v, i) => {
         const x = xs[i];
-        if (v == null || x == null || i % every) return;
+        if (v == null || x == null || i % every || x < xScale.min || x > xScale.max) return;
         const size = sizes ? sizes[i] : null;
         const r = sizes ? (size != null && size > 0 && maxSize ? Math.max(2.5, Math.sqrt(size / maxSize) * maxR) : 2.5) : 4;
         const point = `${s.name}: (${tipText(x, xStyle)}, ${tipText(v, chartPointStyle(s, i, vs))})`;

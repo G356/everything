@@ -8,7 +8,7 @@ import { el, fieldId, isComposing } from './dom.js';
 import { icon } from './icons.js';
 import { openModal } from './modal.js';
 import { renderChartSvg, seriesColor } from './chartsvg.js';
-import { CHART_DESCRIPTION_MAX_LENGTH, CHART_TYPES, chartData, chartTitles, defaultChart, normalizeChart } from '../core/charts.js';
+import { CHART_DESCRIPTION_MAX_LENGTH, CHART_TYPES, chartData, chartTitles, chartXBounds, chartXBoundsPatch, defaultChart, normalizeChart } from '../core/charts.js';
 import { parseRange, rangeName } from '../core/cell.js';
 import { changeSubtypePatch } from '../core/chart-subtypes.js';
 import { chartElementPatch, trendlineAllowed } from '../core/chart-design.js';
@@ -89,6 +89,10 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     axisRow.hidden = pieLike || radar;
     y2TitleField.hidden = draft.type !== 'combo' || !axis2Box.checked;
     boundsRow.hidden = pieLike || radar && draft.type !== 'radar';
+    xBoundsRow.hidden = !xyChart();
+    const valueAxis = xyChart() ? 'Vertical axis' : 'Value axis';
+    yMinLabel.textContent = `${valueAxis} minimum`; yMaxLabel.textContent = `${valueAxis} maximum`;
+    yMinInput.setAttribute('aria-label', `${valueAxis} minimum`); yMaxInput.setAttribute('aria-label', `${valueAxis} maximum`);
     binsField.hidden = draft.type !== 'histogram';
     labelsField.hidden = pieLike;
     gridField.hidden = pieLike || radar;
@@ -147,9 +151,18 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
   const numberInput = (value, label) => el('input.input', { type: 'number', step: 'any', value: value ?? '', 'aria-label': label, placeholder: 'Auto' });
   const yMinInput = numberInput(draft.yMin, 'Value axis minimum');
   const yMaxInput = numberInput(draft.yMax, 'Value axis maximum');
+  const yMinLabel = el('span.field-label', {}, 'Value axis minimum'), yMaxLabel = el('span.field-label', {}, 'Value axis maximum');
   const boundsRow = el('div.row.row-2', {},
-    el('label.field', {}, el('span.field-label', {}, 'Value axis minimum'), yMinInput),
-    el('label.field', {}, el('span.field-label', {}, 'Value axis maximum'), yMaxInput));
+    el('label.field', {}, yMinLabel, yMinInput),
+    el('label.field', {}, yMaxLabel, yMaxInput));
+  // A scatter or bubble chart measures values along both axes, so each has its own bounds.
+  let xBounds = chartXBounds(draft);
+  const xMinInput = numberInput(xBounds.min, 'Horizontal axis minimum');
+  const xMaxInput = numberInput(xBounds.max, 'Horizontal axis maximum');
+  const xBoundsRow = el('div.row.row-2', {},
+    el('label.field', {}, el('span.field-label', {}, 'Horizontal axis minimum'), xMinInput),
+    el('label.field', {}, el('span.field-label', {}, 'Horizontal axis maximum'), xMaxInput));
+  const xyChart = () => draft.type === 'scatter' || draft.type === 'bubble';
   const binsInput = el('input.input', { type: 'number', min: 2, max: 100, step: 1, value: draft.bins ?? '', 'aria-label': 'Number of bins', placeholder: 'Auto' });
   const binsField = el('label.field', {}, el('span.field-label', {}, 'Bins'), binsInput);
   // One color swatch per series (per slice for pies), rebuilt when the series change.
@@ -222,7 +235,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     el('label.field', {}, el('span.field-label', {}, 'Vertical axis title'), yTitleInput), y2TitleField);
 
   // The fields a problem can be laid at; the message names it and the field at fault is marked and focused.
-  const checkedFields = [rangeInput, yMinInput, yMaxInput, binsInput, periodInput, ...sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])];
+  const checkedFields = [rangeInput, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput, periodInput, ...sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])];
   /** Reads the form into the draft; null, or { msg, fields } for what stops the chart. */
   function readForm() {
     const problem = (msg, ...fields) => ({ msg, fields });
@@ -284,6 +297,13 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     if (yMin != null && yMax != null && yMin >= yMax) return problem('The axis minimum must be below the maximum', yMinInput, yMaxInput);
     draft.yMin = Number.isFinite(yMin) ? yMin : null;
     draft.yMax = Number.isFinite(yMax) ? yMax : null;
+    if (xyChart()) {
+      const xMin = xMinInput.value.trim() === '' ? null : Number(xMinInput.value);
+      const xMax = xMaxInput.value.trim() === '' ? null : Number(xMaxInput.value);
+      if (xMin != null && xMax != null && xMin >= xMax) return problem('The axis minimum must be below the maximum', xMinInput, xMaxInput);
+      xBounds = { min: Number.isFinite(xMin) ? xMin : null, max: Number.isFinite(xMax) ? xMax : null };
+      Object.assign(draft, chartXBoundsPatch(draft, xBounds.min, xBounds.max));
+    }
     const bins = binsInput.value.trim() === '' ? null : Number(binsInput.value);
     const binsOk = bins == null || (Number.isInteger(bins) && bins >= 2 && bins <= 100);
     // The field is hidden for every type but histogram, so only a histogram is held up by what it says.
@@ -339,7 +359,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
   let redraw = 0;
   const refreshSoon = () => { clearTimeout(redraw); redraw = setTimeout(refresh, 150); };
   for (const input of sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])) input.addEventListener('input', refreshSoon);
-  for (const input of [rangeInput, seriesSel, headersSel, stackedBox, stack100Box, trendSel, orderSel, periodInput, eqBox, r2Box, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox, yMinInput, yMaxInput, binsInput]) input.addEventListener('input', refresh);
+  for (const input of [rangeInput, seriesSel, headersSel, stackedBox, stack100Box, trendSel, orderSel, periodInput, eqBox, r2Box, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput]) input.addEventListener('input', refresh);
   for (const input of [titleInput, descriptionInput, xTitleInput, yTitleInput, y2TitleInput]) input.addEventListener('input', refreshSoon);
   for (const input of [seriesSel, headersSel, stackedBox, stack100Box, trendSel, orderSel, eqBox, r2Box, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox]) input.addEventListener('change', refresh);
 
@@ -359,6 +379,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
         titleRef: draft.titleRef, xTitleRef: draft.xTitleRef, yTitleRef: draft.yTitleRef, y2TitleRef: draft.y2TitleRef,
         ...(restyled ? Object.fromEntries(SUBTYPE_KEYS.map(k => [k, draft[k]])) : {}),
         ...(labelPatch?.appearance ? { appearance: labelPatch.appearance } : {}),
+        ...(xyChart() ? chartXBoundsPatch({ appearance: labelPatch?.appearance || draft.appearance }, xBounds.min, xBounds.max) : {}),
       });
       modal.close();
       ctx.grid.selectChart(chart.id);
@@ -403,6 +424,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
           el('label.field', {}, el('span.field-label', {}, 'Series in'), seriesSel),
           el('label.field', {}, el('span.field-label', {}, 'Labels'), headersSel)),
         axisRow,
+        xBoundsRow,
         boundsRow,
         binsField,
         el('div.row.row-2', {},

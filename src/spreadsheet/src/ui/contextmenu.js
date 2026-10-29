@@ -50,7 +50,7 @@ function groupItems(ctx) {
   ];
 }
 
-export function openCellContextMenu(ctx, { x, y, kind, chartId }) {
+export function openCellContextMenu(ctx, { x, y, kind, chartId, target = null }) {
   if (kind === 'chart' && ctx.wb.chartById(ctx.sheetId(), chartId)?.type === 'smartart') {
     // A SmartArt graphic: its text, its layout, and the actions every drawing object has.
     const smartArt = (action, extra = {}) => () => ctx.run('smartArt', { action, id: chartId, ...extra });
@@ -87,10 +87,14 @@ export function openCellContextMenu(ctx, { x, y, kind, chartId }) {
     const linked = image && !!ctx.wb.chartById(ctx.sheetId(), chartId)?.pictureRef;
     const scroll = ctx.wb.chartById(ctx.sheetId(), chartId)?.type === 'scroll';
     const textBox = ctx.wb.chartById(ctx.sheetId(), chartId)?.type === 'text';
+    // A right-click on an axis offers its Format pane, as a double-click opens it.
+    const axis = target?.closest?.('[data-el]')?.getAttribute('data-el');
+    const formatAxis = ['xAxis', 'yAxis', 'y2Axis'].includes(axis) ? () => { ctx.run('chart', { action: 'selectElement', element: axis }); ctx.run('chart', { action: 'formatPane', element: axis }); } : null;
     openMenu({
       x, y, label: slicer ? 'Slicer actions' : scroll ? 'Scroll bar actions' : image ? 'Image actions' : textBox ? 'Text box actions' : 'Chart actions', restoreFocus: false, onClose: () => ctx.grid.focus(),
       items: [
         !image && { label: slicer ? 'Edit slicer…' : scroll ? 'Edit scroll bar…' : textBox ? 'Edit text…' : 'Edit chart…', icon: textBox ? 'text' : 'chartColumn', shortcut: 'Enter', onSelect: () => ctx.run('editChart', chartId) },
+        formatAxis && { label: 'Format Axis…', icon: 'chartColumn', onSelect: formatAxis },
         image && !linked && { label: 'Replace image…', icon: 'image', onSelect: () => ctx.run('replaceImage', chartId) },
         image && linked && { label: 'Go to Linked Cells', icon: 'linkedPicture', onSelect: () => ctx.run('replaceImage', chartId) },
         image && { label: 'Place in Cell', icon: 'placeInCell', onSelect: () => ctx.run('placeObjectInCell', chartId) },

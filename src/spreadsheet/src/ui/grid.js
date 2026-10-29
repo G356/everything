@@ -2180,7 +2180,7 @@ export function createGrid(opts) {
         // A double-click opens what the object has to edit: the chart or text dialog, or the picker for a
         // picture to put in the image's place; it never reaches the cell under the object.
         node.addEventListener('dblclick', (e) => { if (underFrozenPane(node, e.clientX, e.clientY)) return; e.stopPropagation(); opts.onCommand?.(image ? 'replaceImage' : 'editChart', ch.id); });
-        node.addEventListener('contextmenu', (e) => { if (underFrozenPane(node, e.clientX, e.clientY)) return; e.preventDefault(); e.stopPropagation(); if (!objectSelected(ch.id)) selectChart(ch.id); opts.onContextMenu?.({ x: e.clientX, y: e.clientY, kind: 'chart', chartId: ch.id }); });
+        node.addEventListener('contextmenu', (e) => { if (underFrozenPane(node, e.clientX, e.clientY)) return; e.preventDefault(); e.stopPropagation(); if (!objectSelected(ch.id)) selectChart(ch.id); opts.onContextMenu?.({ x: e.clientX, y: e.clientY, kind: 'chart', chartId: ch.id, target: e.target }); });
         box = { el: node, body, sig: null };
         chartBoxes.set(ch.id, box);
         objectsLayer.append(node);

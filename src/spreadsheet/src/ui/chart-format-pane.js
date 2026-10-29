@@ -10,9 +10,9 @@
 import { el, isComposing } from './dom.js';
 import { icon } from './icons.js';
 import { activeChart, isChartObject, ringCountOf, seriesCountOf } from './chart-actions.js';
-import { elementLabel } from './chart-ribbon.js';
+import { chartElementKeys, elementLabel } from './chart-ribbon.js';
 import { seriesColor } from './chartsvg.js';
-import { chartData, chartTitles, CHART_DISPLAY_UNITS } from '../core/charts.js';
+import { chartData, chartTitles, chartXBounds, chartXBoundsPatch, CHART_DISPLAY_UNITS } from '../core/charts.js';
 import { chartElementPatch, dataLabelPositions, elementFormatPatch, isPieChart, trendlineAllowed, trendlinePatch } from '../core/chart-design.js';
 import { INTERCEPT_TYPES, TREND_TYPES, trendFor, trendName, trendProblem } from '../core/trendline.js';
 import { barSpacing } from '../core/chart-subtypes.js';
@@ -22,6 +22,14 @@ const PANE_TITLES = { chartArea: 'Format Chart Area', plotArea: 'Format Plot Are
   'gridlines-x': 'Format Gridlines', 'gridlines-y': 'Format Gridlines' };
 const KEY_TITLES = [[/^series:/, 'Format Data Series'], [/^point:/, 'Format Data Point'], [/^dataLabels:/, 'Format Data Labels'],
   [/^trendline:/, 'Format Trendline'], [/^trendlineLabel:/, 'Format Trendline Label']];
+const AXIS_KEYS = ['xAxis', 'yAxis', 'y2Axis'];
+/** An axis named by where it runs and what it measures: a scatter chart's both axes measure values, a bar chart's categories run down the side. */
+export function axisName(chart, key) {
+  if (key === 'y2Axis') return 'Secondary Vertical (Value) Axis';
+  const scatter = chart.type === 'scatter' || chart.type === 'bubble', bar = chart.type === 'bar';
+  if (key === 'xAxis') return `${bar ? 'Vertical' : 'Horizontal'} (${scatter ? 'Value' : 'Category'}) Axis`;
+  return `${bar ? 'Horizontal' : 'Vertical'} (Value) Axis`;
+}
 const AXIS_PLOTS = new Set(['line', 'area', 'column', 'bar', 'combo', 'scatter', 'bubble', 'histogram']);
 export const paneTitle = key => PANE_TITLES[key] || KEY_TITLES.find(([pattern]) => pattern.test(key))?.[1] || 'Format';
 
@@ -413,14 +421,16 @@ export function createChartUi(ctx) {
         v => apply(chartElementPatch(chart, 'legend', v)))), textOptions(chart, 'legendStyle'));
     } else if (key === 'xTitle' || key === 'yTitle') {
       out.push(section('Title Options', text('Text', chartTitles(ctx.wb, ctx.sheetId(), chart)[key] ?? chart[key], v => apply({ [key]: v.trim(), [`${key}Ref`]: undefined }))));
-    } else if (key === 'yAxis' || (key === 'y2Axis' && a) || (key === 'xAxis' && a && (chart.type === 'scatter' || chart.type === 'bubble'))) {
-      // A scatter chart in the app's own style has no x bounds: one set would hand it an empty Excel style.
+    } else if (key === 'yAxis' || (key === 'y2Axis' && a) || (key === 'xAxis' && (chart.type === 'scatter' || chart.type === 'bubble'))) {
+      // A scatter chart's x axis is a value axis too: its bounds, in either style (see chartXBounds).
       // The secondary value axis has the primary's options, its own keys (it draws no logarithmic scale).
       const value = key !== 'xAxis', second = key === 'y2Axis', y = second ? 'y2' : value ? 'y' : 'x';
       const minKey = `${y}Min`, maxKey = `${y}Max`, stepKey = `${y}Step`, logKey = `${y}LogBase`;
       const reverseKey = second ? 'reverseSecondaryValues' : value ? 'reverseValues' : 'reverseCategories';
-      const get = k => (k === 'yMin' || k === 'yMax' ? chart[k] : a?.[k]);
-      const setBound = (k, v) => apply(k === 'yMin' || k === 'yMax' ? { [k]: v } : { appearance: { ...a, [k]: v } });
+      const xb = chartXBounds(chart);
+      const get = k => (k === 'yMin' || k === 'yMax' ? chart[k] : k === 'xMin' ? xb.min : k === 'xMax' ? xb.max : a?.[k]);
+      const setBound = (k, v) => apply(k === 'yMin' || k === 'yMax' ? { [k]: v } : k === 'xMin' ? chartXBoundsPatch(chart, v, xb.max)
+        : k === 'xMax' ? chartXBoundsPatch(chart, xb.min, v) : { appearance: { ...a, [k]: v } });
       const units = a?.[`${y}Units`]?.builtIn || 'none';
       out.push(section('Axis Options',
         el('h3.chart-pane-sub', {}, 'Bounds'),
@@ -532,6 +542,14 @@ export function createChartUi(ctx) {
     return out;
   }
 
+  // Format Axis formats one axis at a time; this picks which, as the axes themselves can be hard to click.
+  function axisPicker(chart, key) {
+    if (!AXIS_KEYS.includes(key)) return null;
+    const keys = chartElementKeys(chart, 0).filter(k => AXIS_KEYS.includes(k));
+    if (keys.length < 2) return null;
+    return el('div.chart-pane-fields.chart-pane-axis', {}, choice('Axis', key, keys.map(k => [k, axisName(chart, k)]), k => setElement(k)));
+  }
+
   function renderPane() {
     if (pane.hidden) return;
     const chart = activeChart(ctx);
@@ -545,7 +563,7 @@ export function createChartUi(ctx) {
     paneSig = sig;
     paneTitleEl.textContent = paneTitle(key);
     const open = new Set([...paneBody.querySelectorAll('details.chart-pane-section:not([open]) > summary')].map(s => s.textContent));
-    const sections = [...options(chart, key), fillAndLine(chart, key), effects(chart, key)].filter(Boolean);
+    const sections = [axisPicker(chart, key), ...options(chart, key), fillAndLine(chart, key), effects(chart, key)].filter(Boolean);
     if (!chart.appearance && !sections.length) sections.push(el('p.chart-pane-note', {}, 'This chart keeps the app’s own style. Change Chart Type gives it the full formatting options.'));
     for (const s of sections) if (open.has(s.querySelector('summary')?.textContent)) s.open = false;
     paneBody.replaceChildren(...sections);

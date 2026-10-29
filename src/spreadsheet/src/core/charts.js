@@ -26,6 +26,8 @@ import { normalizeTrendlines } from './trendline.js';
  *   gridlines: boolean,              value-axis gridlines (default true)
  *   smooth: boolean,                 curved lines (line and area)
  *   yMin, yMax: number | null,       fixed value-axis bounds; null fits the data
+ *   xMin?, xMax?: number,            scatter and bubble charts in the app's own style: fixed x-axis bounds
+ *                                    (an Excel-style chart keeps them in its appearance; see chartXBounds)
  *   bins: number | null,             histogram bin count; null picks one from the data
  *   includeHidden: boolean,          chart hidden and filtered-out rows and columns too (default false)
  *   sourceRefs?: [{ name, nameRef, pivotName, categories, values, labels, categoryFormat, valueFormat }],
@@ -122,6 +124,20 @@ export function defaultChart(range, anchor) {
 export const IMAGE_MIN = 24;
 
 /** An image floating over the sheet shares the chart object model: anchor, offset, size. */
+/**
+ * A scatter or bubble chart's fixed x-axis bounds, null for automatic. A chart in the app's own style keeps
+ * them on the chart, as it does its value-axis bounds; an Excel-style chart keeps them in its appearance.
+ */
+export function chartXBounds(chart) {
+  const from = chart?.appearance || chart || {};
+  return { min: Number.isFinite(from.xMin) ? from.xMin : null, max: Number.isFinite(from.xMax) ? from.xMax : null };
+}
+
+/** The patch that sets a chart's x-axis bounds (null for automatic) where its style keeps them. */
+export function chartXBoundsPatch(chart, min, max) {
+  return chart.appearance ? { appearance: { ...chart.appearance, xMin: min, xMax: max } } : { xMin: min, xMax: max };
+}
+
 export function isImage(obj) {
   return obj?.type === 'image';
 }
@@ -392,6 +408,8 @@ function normalizeChartBody(raw) {
     ...(type === 'combo' && raw.pareto && raw.sourceRefs?.length === 1 ? { pareto: true } : {}),
     yMin: Number.isFinite(raw.yMin) && (!Number.isFinite(raw.yMax) || raw.yMin < raw.yMax) ? raw.yMin : null,
     yMax: Number.isFinite(raw.yMax) && (!Number.isFinite(raw.yMin) || raw.yMin < raw.yMax) ? raw.yMax : null,
+    ...(Number.isFinite(raw.xMin) && (!Number.isFinite(raw.xMax) || raw.xMin < raw.xMax) ? { xMin: raw.xMin } : {}),
+    ...(Number.isFinite(raw.xMax) && (!Number.isFinite(raw.xMin) || raw.xMin < raw.xMax) ? { xMax: raw.xMax } : {}),
     bins: Number.isInteger(raw.bins) && raw.bins >= 2 && raw.bins <= 100 ? raw.bins : null,
     includeHidden: !!raw.includeHidden,
     ...normalizeSpecialOptions(type, raw),

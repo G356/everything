@@ -75,6 +75,8 @@ function addElementMenu(ctx) {
   if (!chart) return [];
   const state = chartElementState(chart), axes = hasAxes(chart), styled = !!chart.appearance, pie = isPieChart(chart);
   const el2 = (element, value) => ({ action: 'element', element, value });
+  // More Axis Options opens the axis selected in the chart, or the value axis.
+  const current = ctx.chartUi?.element(), selectedAxis = ['xAxis', 'yAxis', 'y2Axis'].includes(current) ? current : 'yAxis';
   const can = (element, value) => !!chartElementPatch(chart, element, value, { seriesCount: 1 });
   const sub = (label, iconName, items, disabled = false) => ({ label, icon: iconName, submenu: items, disabled: disabled || !items.length });
   return [
@@ -82,7 +84,7 @@ function addElementMenu(ctx) {
       check('Horizontal Axis', state.axes.horizontal, el2('axes', { axis: 'horizontal', on: !state.axes.horizontal })),
       check('Vertical Axis', state.axes.vertical, el2('axes', { axis: 'vertical', on: !state.axes.vertical })),
       secondaryAxis(chart) && check('Secondary Vertical Axis', state.axes.secondary, el2('axes', { axis: 'secondary', on: !state.axes.secondary })),
-      { separator: true }, { label: 'More Axis Options…', cmd: 'chart', arg: { action: 'formatPane', element: 'yAxis' } }].filter(Boolean) : [], !axes || !styled),
+      { separator: true }, { label: 'More Axis Options…', cmd: 'chart', arg: { action: 'formatPane', element: selectedAxis } }].filter(Boolean) : [], !axes || !styled),
     sub('Axis Titles', 'textBox', axes ? [
       check('Horizontal Axis Title', state.axisTitles.horizontal, el2('axisTitles', { axis: 'horizontal', on: !state.axisTitles.horizontal })),
       check('Vertical Axis Title', state.axisTitles.vertical, el2('axisTitles', { axis: 'vertical', on: !state.axisTitles.vertical })),

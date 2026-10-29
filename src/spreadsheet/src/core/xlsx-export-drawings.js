@@ -1,7 +1,7 @@
 import { cellAnchorFrame, drawingAxisOffsets, exportCellAnchor } from './drawing-cell-anchor.js';
 import { slicerFrameXml, nativePivotSlicerParts } from './xlsx-export-slicers.js';
 /** DrawingML charts and pictures for readers which do not know the app's sidecar. */
-import { authoredBarGapWidth, chartPointStyle, chartData, textBoxText } from './charts.js';
+import { authoredBarGapWidth, chartPointStyle, chartData, chartXBounds, textBoxText } from './charts.js';
 import { INTERCEPT_TYPES, trendFor } from './trendline.js';
 import { fontName, styleToNumFmt, formatValue, numFmtToStyle } from './format.js';
 import { xmlTag as tag, xmlText } from './xlsx-export-styles.js';
@@ -372,7 +372,7 @@ function chartXml(X, wb, sheet, ch) {
   const axis = (id, horizontal, secondary = false) => {
     const numeric = !horizontal || ch.type === 'scatter' || ch.type === 'bubble', date = horizontal && ap.dateAxis;
     const kind = numeric ? 'valAx' : date ? 'dateAx' : 'catAx';
-    const min = horizontal ? ap.xMin : secondary ? ap.y2Min : ch.yMin, max = horizontal ? ap.xMax : secondary ? ap.y2Max : ch.yMax;
+    const min = horizontal ? chartXBounds(ch).min : secondary ? ap.y2Min : ch.yMin, max = horizontal ? chartXBounds(ch).max : secondary ? ap.y2Max : ch.yMax;
     const reversed = horizontal ? ap.reverseCategories : secondary ? ap.reverseSecondaryValues : ap.reverseValues;
     const logBase = horizontal ? (numeric ? ap.xLogBase : null) : secondary ? null : ap.yLogBase;
     let body = val('axId', id) + tag('c:scaling', {}, (logBase ? val('logBase', logBase) : '') + val('orientation', reversed ? 'maxMin' : 'minMax') + (max != null ? val('max', max) : '') + (min != null ? val('min', min) : ''));
