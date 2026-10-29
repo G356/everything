@@ -26,6 +26,9 @@ import { normalizeAxisTickValues } from './axis-tick-values.js';
  *   labels: boolean,                 write each value on its bar or point
  *   xTitle, yTitle, y2Title: string,          axis titles
  *   colors: (string|null)[],         a hex color per series (per slice for pies); null keeps the palette color
+ *   seriesLines?: ({ width?, marker?, markerSymbol?, markerSize? } | null)[],  a chart in the app's own style: each
+ *                                    series' line width (px) and markers (size in points); null keeps the defaults
+ *                                    (an Excel-style chart keeps them in its appearance's lines; see chartSeriesLine)
  *   legendPos: 'bottom' | 'top' | 'right',
  *   gridlines: boolean,              value-axis gridlines (default true)
  *   xGridlines?: boolean,            a chart in the app's own style: gridlines along the category (or scatter x) axis
@@ -144,6 +147,27 @@ export function chartXBounds(chart) {
 
 /** Does the chart draw gridlines along its category (or x) axis? Kept where its style keeps them, as its x bounds are. */
 export const chartXGridlines = chart => !!(chart?.appearance || chart)?.xGridlines;
+
+/**
+ * Series `i`'s line and markers where its chart's style keeps them: an Excel-style chart in its appearance's lines,
+ * one in the app's own style in seriesLines. Null where the series has none of its own.
+ */
+export function chartSeriesLine(chart, i) {
+  const a = chart?.appearance;
+  return (a ? a.lines?.[i] || a.lineDefault : chart?.seriesLines?.[i]) || null;
+}
+
+/** The patch that sets `change` (width, marker, markerSymbol, markerSize in points) on the series `indexes`' lines. */
+export function chartSeriesLinePatch(chart, indexes, change) {
+  const a = chart.appearance;
+  const start = a ? a.lineDefault || { width: 2, marker: true, markerSize: 5 } : null;
+  const lines = [...((a ? a.lines : chart.seriesLines) || [])];
+  for (const i of indexes) {
+    while (lines.length <= i) lines.push(start && { ...start });
+    lines[i] = { ...(lines[i] || start), ...change, ...(a && change.markerSize != null ? { markerSizeUnit: 'pt' } : {}) };
+  }
+  return a ? { appearance: { ...a, lines } } : { seriesLines: lines };
+}
 
 /** The patch that sets a chart's x-axis bounds (null for automatic) where its style keeps them. */
 export function chartXBoundsPatch(chart, min, max) {
@@ -417,6 +441,7 @@ function normalizeChartBody(raw) {
     } } : {}),
     ...(linkedText ? { linkedText } : {}),
     colors: normalizeColors(raw.colors),
+    ...(!raw.appearance && normalizeSeriesLines(raw.seriesLines).length ? { seriesLines: normalizeSeriesLines(raw.seriesLines) } : {}),
     legendPos: raw.legendPos === 'top' || raw.legendPos === 'right' ? raw.legendPos : 'bottom',
     gridlines: raw.gridlines !== false,
     ...(raw.xGridlines === true && !raw.appearance ? { xGridlines: true } : {}),
@@ -811,6 +836,23 @@ const HEX_RE = /^#[0-9a-f]{6}$/i;
 function normalizeColors(list) {
   if (!Array.isArray(list)) return [];
   const out = list.slice(0, 50).map((c) => (typeof c === 'string' && (HEX_RE.test(c.trim()) || c.trim() === 'none') ? c.trim().toLowerCase() : null));
+  while (out.length && out[out.length - 1] == null) out.pop();
+  return out;
+}
+
+/** A chart in the app's own style: each series' own line width and markers, trailing defaults dropped; at most 50. */
+function normalizeSeriesLines(list) {
+  if (!Array.isArray(list)) return [];
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const out = list.slice(0, 50).map((l) => {
+    const line = {
+      ...(isNum(l?.width) ? { width: clamp(l.width, .25, 20) } : {}),
+      ...(l?.marker === false ? { marker: false } : {}),
+      ...(CHART_MARKER_SYMBOLS.includes(l?.markerSymbol) && !['auto', 'none'].includes(l.markerSymbol) ? { markerSymbol: l.markerSymbol } : {}),
+      ...(isNum(l?.markerSize) ? { markerSize: clamp(l.markerSize, 2, 72) } : {}),
+    };
+    return Object.keys(line).length ? line : null;
+  });
   while (out.length && out[out.length - 1] == null) out.pop();
   return out;
 }

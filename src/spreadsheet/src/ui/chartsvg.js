@@ -786,14 +786,18 @@ function renderChartContent(data, chart, width, height) {
     const every = Math.max(1, Math.ceil(points / MARK_BUDGET));
     series.forEach((s, si) => {
       const color = seriesPaint(chart, si);
+      // A point's own size (in points) and shape, set on the series (Edit chart ▸ Marker size); a bubble's is its size.
+      const own = sizes ? null : ownLine(chart, si);
       s.values.forEach((v, i) => {
         const x = xs[i];
         if (v == null || x == null || i % every || x < xScale.min || x > xScale.max) return;
         const size = sizes ? sizes[i] : null;
-        const r = sizes ? (size != null && size > 0 && maxSize ? Math.max(2.5, Math.sqrt(size / maxSize) * maxR) : 2.5) : 4;
+        const r = sizes ? (size != null && size > 0 && maxSize ? Math.max(2.5, Math.sqrt(size / maxSize) * maxR) : 2.5) : own?.markerSize ? own.markerSize * 2 / 3 : 4;
         const point = `${s.name}: (${tipText(x, xStyle)}, ${tipText(v, chartPointStyle(s, i, vs))})`;
         const tip = sizes ? `${point}, size ${size == null ? 'blank' : tipText(size, data.sizePointStyles?.[i] || data.sizeStyle)}` : point;
-        parts.push(`<circle cx="${f(sx(x))}" cy="${f(vy(v))}" r="${f(r)}" fill="${color}" fill-opacity="${sizes ? 0.55 : 0.85}"${sizes ? ` stroke="${color}" stroke-width="1"` : ''}><title>${esc(tip)}</title></circle>`);
+        if (own?.marker === false) { /* no marker: the point shows by its label alone */ }
+        else if (own?.markerSymbol && own.markerSymbol !== 'circle') parts.push(chartMarker(own.markerSymbol, sx(x), vy(v), r * 2, color, color, tip));
+        else parts.push(`<circle cx="${f(sx(x))}" cy="${f(vy(v))}" r="${f(r)}" fill="${color}" fill-opacity="${sizes ? 0.55 : 0.85}"${sizes ? ` stroke="${color}" stroke-width="1"` : ''}><title>${esc(tip)}</title></circle>`);
         // Labels name the values, or on a bubble chart the sizes: a point whose size is blank gets none,
         // rather than one that means something else than its neighbours'.
         const label = sizes ? (size != null ? data.sizePointStyles?.[i] ? formatValue(size, data.sizePointStyles[i]) : pointValueText(size, data.sizeStyle || null) : null) : valueText(v, s, i);
@@ -947,6 +951,7 @@ function renderChartContent(data, chart, width, height) {
     lineIdx.forEach((si) => {
       const s = series[si];
       const color = s.fold ? 'var(--ink-3)' : seriesPaint(chart, si);
+      const own = s.fold ? null : ownLine(chart, si), width = own?.width ?? 2;
       const pts = [];
       const lows = [];
       s.values.forEach((v, i) => {
@@ -972,7 +977,7 @@ function renderChartContent(data, chart, width, height) {
             const backPath = smoothPath([...idx].reverse().map((i) => lows[i]), true);
             parts.push(`<path d="${topPath} ${backPath} Z" fill="${color}" fill-opacity="0.22"/>`);
           }
-          parts.push(`<path d="${topPath}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`);
+          parts.push(`<path d="${topPath}" fill="none" stroke="${color}" stroke-width="${f(width)}" stroke-linejoin="round" stroke-linecap="round"/>`);
           continue;
         }
         if (chart.type === 'area' && idx.length) {
@@ -980,12 +985,15 @@ function renderChartContent(data, chart, width, height) {
           parts.push(`<polygon points="${line} ${back}" fill="${color}" fill-opacity="0.22"/>`);
         }
         if (idx.length === 1) parts.push(`<circle cx="${f(pts[idx[0]][0])}" cy="${f(pts[idx[0]][1])}" r="3.5" fill="${color}"/>`);
-        else parts.push(`<polyline points="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`);
+        else parts.push(`<polyline points="${line}" fill="none" stroke="${color}" stroke-width="${f(width)}" stroke-linejoin="round" stroke-linecap="round"/>`);
       }
       if (showPoints) {
+        const r = own?.markerSize ? own.markerSize * 2 / 3 : 3;
         pts.forEach((p, i) => {
           if (!p) return;
-          parts.push(`<circle cx="${f(p[0])}" cy="${f(p[1])}" r="3" fill="${color}"><title>${esc(tipFor(s, i))}</title></circle>`);
+          if (own?.marker === false) { /* no marker */ }
+          else if (own?.markerSymbol && own.markerSymbol !== 'circle') parts.push(chartMarker(own.markerSymbol, p[0], p[1], r * 2, color, color, tipFor(s, i)));
+          else parts.push(`<circle cx="${f(p[0])}" cy="${f(p[1])}" r="${f(r)}" fill="${color}"><title>${esc(tipFor(s, i))}</title></circle>`);
           if (chart.labels && (n <= 24 || i % Math.ceil(n / 24) === 0)) parts.push(`<text x="${f(p[0])}" y="${f(p[1] - 7)}" text-anchor="middle" font-size="10" fill="var(--ink-2)">${esc(valueText(s.values[i], s, i))}</text>`);
         });
       }
@@ -2126,6 +2134,9 @@ function thinToPixels(categories, series, px) {
   const pick = (values) => keep.map((i) => values[i]);
   return { categories: pick(categories), series: series.map((s) => ({ ...s, values: pick(s.values), ...(s.raw ? { raw: pick(s.raw) } : {}) })) };
 }
+
+/** A series' own line and markers on a chart in the app's own style (an Excel-style chart draws its appearance's). */
+const ownLine = (chart, i) => (chart.appearance ? null : chart.seriesLines?.[i] || null);
 
 // Native marker sizes are points; SVG coordinates use CSS pixels (96 dpi).
 const markerPixels = line => (line?.markerSize ?? 5) * 4 / 3;

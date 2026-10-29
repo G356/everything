@@ -24,7 +24,7 @@ import { parseFormula } from './formula/parser.js';
 import { evaluateFormula, resetArrayBudget } from './formula/evaluator.js';
 import { isError, isRange } from './formula/functions.js';
 import { formatValue, fontKeyFor, parseTime, ymdToSerial, serialToYMD, parseInput, editText } from './format.js';
-import { CHART_TYPES, CHART_MIN_W, CHART_MIN_H, chartTitles } from './charts.js';
+import { CHART_TYPES, CHART_MIN_W, CHART_MIN_H, chartData, chartSeriesLinePatch, chartTitles } from './charts.js';
 import { subtypeOf, chartSubtype, changeSubtypePatch } from './chart-subtypes.js';
 import { effectiveFontTheme } from './font-theme.js';
 import { findAll, replaceCells, replaceInText, compilePattern, cellMatches, searchBudget } from './search.js';
@@ -118,6 +118,7 @@ const str = (description, extra = {}) => ({ type: 'string', description, ...extr
 const num = (description, extra = {}) => ({ type: 'number', description, ...extra });
 const int = (description, extra = {}) => ({ type: 'integer', description, ...extra });
 const bool = (description) => ({ type: 'boolean', description });
+const SERIES_MARKERS = ['circle', 'square', 'diamond', 'triangle', 'x', 'plus', 'star', 'dash', 'none'];
 const RANGE = str('An A1 range such as "B2:D20", "A:A" or a single cell "C5", optionally with a sheet: "Sales!A1:F50" or "\'Q1 Data\'!B2". A named range or a table name works too. Without a sheet it means the active sheet.');
 // With series in rows, the first row: whether it labels the categories along the chart or plots as a series of its own.
 const FIRST_COLUMN = str('Whether the data\'s first column (first row, with series in rows) holds the category labels along the horizontal axis, such as years or x values, or is plotted as a series of its own (default: guessed).', { enum: ['categories', 'series', 'auto'] });
@@ -258,7 +259,7 @@ export const TOOLS = [
     series_in: str('Whether each column or each row of the data is one series (default: guessed).', { enum: ['columns', 'rows'] }),
     first_column: FIRST_COLUMN,
   }, ['data_range', 'type']),
-  fn('update_chart', 'Change a chart: its type, data, titles, stacking, legend, position or size. Give only what changes; an empty title removes it.', {
+  fn('update_chart', 'Change a chart: its type, data, titles, stacking, legend, series colors, markers and line widths, position or size. Give only what changes; an empty title removes it.', {
     chart: str('The chart\'s id from get_sheet_details or get_workbook_info, or its title or name when no other chart shares it.'),
     type: str('New chart type.', { enum: CHART_TYPES.map(([t]) => t) }),
     data_range: str('New data range, on the chart\'s sheet, read as create_chart reads it.'),
@@ -269,6 +270,13 @@ export const TOOLS = [
     legend: str('Where the legend goes, or none.', { enum: ['bottom', 'top', 'right', 'none'] }),
     anchor_cell: str('Cell to move the chart\'s top-left corner to.'),
     width: num('Width in pixels.'), height: num('Height in pixels.'),
+    series_styles: { type: 'array', description: 'How series look: their color and, on line, scatter and combo charts (radar too in Excel\'s style), their markers and line width. Each item styles one series, or every series when it names none; on a pie or donut chart an item colors one slice.', items: { type: 'object', properties: {
+      series: { type: ['string', 'integer'], description: 'The series by name or by number from 1 (a pie\'s slice by its category); omit for every series.' },
+      color: str('Hex color such as "#1f77b4".'),
+      marker_size: num('Marker size in points, 2 to 72 (Excel\'s default is 5). Shows the markers if they were off.'),
+      marker: str('Marker shape, or none to hide the markers.', { enum: SERIES_MARKERS }),
+      line_width: num('Line width in points, 0.25 to 15.'),
+    }, additionalProperties: false } },
   }, ['chart']),
   fn('delete_chart', 'Delete a chart.', {
     chart: str('The chart\'s id from get_sheet_details or get_workbook_info, or its title or name when no other chart shares it.'),
@@ -2297,6 +2305,7 @@ function updateChart(wb, args, env) {
     Object.assign(patch, { anchor: { r: at.range.r1, c: at.range.c1 }, dx: 0, dy: 0 });
     changes.push(`moved to ${cellName(at.range.r1, at.range.c1)}`);
   }
+  if (args.series_styles != null) styleChartSeries(wb, sheet, chart, args.series_styles, patch, changes);
   for (const [key, field, min] of [['width', 'w', CHART_MIN_W], ['height', 'h', CHART_MIN_H]]) {
     if (args[key] == null) continue;
     const n = Math.round(Number(args[key]));
@@ -2311,6 +2320,74 @@ function updateChart(wb, args, env) {
   wb.transaction('AI edit', () => wb.updateChart(sheet.id, chart.id, patch, 'AI edit'));
   const after = wb.chartById(sheet.id, chart.id);
   return { chart: chart.id, sheet: sheet.name, changed: changes, ...(after ? { type: after.type, data: chartSource(after) } : {}) };
+}
+
+/**
+ * update_chart's series_styles: each series' color, and its markers and line width where the chart's type draws them,
+ * kept where the chart's style keeps them (Format Data Series' fields on an Excel-style chart). Adds to `patch`.
+ */
+function styleChartSeries(wb, sheet, chart, styles, patch, changes) {
+  if (!Array.isArray(styles) || !styles.length) throw new ToolError('series_styles must be a list of styles.');
+  const pie = ['pie', 'donut'].includes(patch.type ?? chart.type);
+  const data = chartData(wb, sheet.id, { ...chart, ...patch });
+  const names = pie ? data.categories : data.series.map((s) => s.name);
+  if (!names.length) throw new ToolError('The chart has no series to style.');
+  let current = { ...chart, ...patch };
+  for (const style of styles.slice(0, 50)) {
+    if (!style || typeof style !== 'object') throw new ToolError('Each of series_styles must be an object such as { "series": 1, "marker_size": 8 }.');
+    const which = seriesNamed(names, style.series, pie);
+    const label = which.length === 1 ? `"${clip(names[which[0]], 60)}"` : pie ? 'every slice' : 'every series';
+    if (style.color != null) {
+      const hex = String(style.color).trim().toLowerCase();
+      if (!/^#[0-9a-f]{6}$/.test(hex)) throw new ToolError('color must be a hex color such as "#1f77b4".');
+      const colors = Array.from({ length: Math.max(current.colors?.length || 0, ...which.map((i) => i + 1)) }, (_, i) => current.colors?.[i] ?? null);
+      for (const i of which) colors[i] = hex;
+      current = { ...current, colors };
+      patch.colors = colors;
+      changes.push(`${label} color ${hex}`);
+    }
+    const line = {};
+    if (style.marker_size != null) {
+      const size = Number(style.marker_size);
+      if (!(size >= 2 && size <= 72)) throw new ToolError('marker_size must be 2 to 72 points.');
+      Object.assign(line, { markerSize: size, marker: true });
+    }
+    if (style.marker != null) {
+      if (!SERIES_MARKERS.includes(style.marker)) throw new ToolError(`marker must be one of ${SERIES_MARKERS.join(', ')}.`);
+      Object.assign(line, style.marker === 'none' ? { marker: false } : { marker: true, markerSymbol: style.marker });
+    }
+    if (style.line_width != null) {
+      const width = Number(style.line_width);
+      if (!(width >= 0.25 && width <= 15)) throw new ToolError('line_width must be 0.25 to 15 points.');
+      line.width = width * 4 / 3;
+    }
+    if (!Object.keys(line).length) continue;
+    // The types whose series draw markers and lines, in the chart's style: the app's own draws them on an area's points too.
+    const marked = current.appearance ? ['line', 'scatter', 'radar', 'combo'] : ['line', 'scatter', 'combo', 'area'];
+    if (!marked.includes(current.type)) throw new ToolError(`A ${current.type} chart draws no markers or lines to style; ${marked.slice(0, -1).join(', ')} and ${marked.at(-1)} charts do.`);
+    const lines = chartSeriesLinePatch(current, which, line);
+    current = { ...current, ...lines };
+    Object.assign(patch, lines);
+    changes.push(`${label} ${[
+      style.marker === 'none' ? 'markers off' : style.marker != null ? `${style.marker} markers` : null,
+      style.marker_size != null ? `marker size ${line.markerSize}pt` : null,
+      style.line_width != null ? `line width ${style.line_width}pt` : null].filter(Boolean).join(', ')}`);
+  }
+}
+
+/** The indexes of the series (a pie's slices) a style names: by number from 1 or by name, or every one. */
+function seriesNamed(names, ref, pie) {
+  if (ref == null || ref === '') return names.map((_, i) => i);
+  const kind = pie ? 'slice' : 'series';
+  if (typeof ref === 'number' || /^\d+$/.test(String(ref).trim())) {
+    const n = Number(ref);
+    if (!(Number.isInteger(n) && n >= 1 && n <= names.length)) throw new ToolError(`There is no ${kind} ${ref}; the chart has ${names.length}.`);
+    return [n - 1];
+  }
+  const fold = String(ref).trim().toLocaleLowerCase();
+  const at = names.findIndex((name) => String(name).trim().toLocaleLowerCase() === fold);
+  if (at < 0) throw new ToolError(`There is no ${kind} "${clip(String(ref), 60)}". The chart's are: ${names.slice(0, 12).map((name) => `"${clip(String(name), 40)}"`).join(', ')}${names.length > 12 ? ', …' : ''}.`);
+  return [at];
 }
 
 function deleteChart(wb, args) {

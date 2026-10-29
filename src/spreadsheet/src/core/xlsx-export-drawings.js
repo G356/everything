@@ -231,7 +231,7 @@ function chartXml(X, wb, sheet, ch) {
     const secondary = ch.secondaryAxis && ch.type === 'combo' && type === 'line' || stockVolume && type === 'stock';
     const sourceGroup = ap.seriesGroups?.[i];
     const key = `${type}:${secondary}:${sourceGroup?.id ?? ''}`, group = groups.get(key) || { type, secondary, grouping: sourceGroup?.grouping, series: '', count: 0 };
-    const color = seriesColor(ch, i), line = ap.lines?.[i] || ap.lineDefault, pie = circular ? ap.pie : null;
+    const color = seriesColor(ch, i), line = ap.lines?.[i] || ap.lineDefault || (ch.appearance ? null : ch.seriesLines?.[i]), pie = circular ? ap.pie : null;
     const isBar = ['column', 'bar'].includes(type), bar = isBar ? ap.bars?.[i] : null;
     const bubble = type === 'bubble' ? ap.bubble?.series?.[i] : null;
     const radar = type === 'radar' ? ap.radar?.series?.[i] : null;

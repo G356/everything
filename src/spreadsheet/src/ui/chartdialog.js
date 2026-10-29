@@ -8,7 +8,7 @@ import { el, fieldId, isComposing } from './dom.js';
 import { icon } from './icons.js';
 import { openModal } from './modal.js';
 import { renderChartSvg, seriesColor } from './chartsvg.js';
-import { CHART_DASH_CHOICES, CHART_DESCRIPTION_MAX_LENGTH, CHART_TYPES, chartErrorValues, chartData, chartTitles, chartXBounds, chartXBoundsPatch, chartXGridlines, defaultChart, normalizeChart } from '../core/charts.js';
+import { CHART_DASH_CHOICES, CHART_DESCRIPTION_MAX_LENGTH, CHART_TYPES, chartErrorValues, chartData, chartTitles, chartSeriesLine, chartSeriesLinePatch, chartXBounds, chartXBoundsPatch, chartXGridlines, defaultChart, normalizeChart } from '../core/charts.js';
 import { parseRange, rangeName } from '../core/cell.js';
 import { changeSubtypePatch } from '../core/chart-subtypes.js';
 import { chartElementPatch, trendlineAllowed } from '../core/chart-design.js';
@@ -100,8 +100,10 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     hGridField.hidden = pieLike || radar;
     vGridField.hidden = pieLike || radar || draft.type === 'surface';
     smoothField.hidden = !['line', 'area', 'combo'].includes(draft.type);
+    markerSizeRow.hidden = markerSizeField.hidden = !['line', 'scatter'].includes(draft.type);
     // Points along x values, a hierarchy's levels and a histogram's bins have no category labels to pick.
     categoriesField.hidden = xyChart() || ['treemap', 'sunburst', 'histogram'].includes(draft.type);
+    categoriesRow.hidden = categoriesField.hidden || !!draft.sourceRefs?.length;
   };
 
   const rangeInput = el('input.input', { type: 'text', value: rangeName(draft.range), 'aria-label': 'Data range', spellcheck: false, autocomplete: 'off', placeholder: 'A1:B10 or a table name' });
@@ -131,6 +133,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     el('option', { value: 'false' }, 'None (number the points)'));
   categoriesSel.value = String(draft.categoryLabels ?? 'auto');
   const categoriesField = el('label.field', {}, el('span.field-label', {}, 'Categories'), categoriesSel);
+  const categoriesRow = el('div.row.row-2', { hidden: !!draft.sourceRefs?.length }, categoriesField);
   const stackedBox = el('input', { type: 'checkbox', checked: !!draft.stacked });
   const stack100Box = el('input', { type: 'checkbox', checked: !!draft.stack100 });
   // The trendline every series takes: the first series' kind and label to begin with. A chart whose series differ
@@ -187,6 +190,14 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
   const xyChart = () => draft.type === 'scatter' || draft.type === 'bubble';
   const binsInput = el('input.input', { type: 'number', min: 2, max: 100, step: 1, value: draft.bins ?? '', 'aria-label': 'Number of bins', placeholder: 'Auto' });
   const binsField = el('label.field', {}, el('span.field-label', {}, 'Bins'), binsInput);
+  // Every series' marker size, in points as Format Data Series gives it. It shows the size the series share (blank when
+  // they differ or keep the default) and changes them only once it says something else.
+  const markerSizeInput = el('input.input', { type: 'number', min: 2, max: 72, step: 1, 'aria-label': 'Marker size (pt)', placeholder: 'Auto' });
+  const markerSizeField = el('label.field', {}, el('span.field-label', {}, 'Marker size (pt)'), markerSizeInput);
+  const markerSizeRow = el('div.row.row-2', {}, markerSizeField);
+  let markerSizeShown = null, markerSize = null;
+  const markerPatch = (target) => (markerSize == null || markerSizeField.hidden ? {}
+    : chartSeriesLinePatch(target, readData().series.map((_, i) => i), { markerSize, marker: true }));
   // One color swatch per series (per slice for pies), rebuilt when the series change.
   const colorsRow = el('div.chart-colors', { role: 'group', 'aria-label': 'Series colors' });
   let colorsKey = '';
@@ -313,7 +324,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     el('label.field', {}, el('span.field-label', {}, 'Vertical axis title'), yTitleInput), y2TitleField);
 
   // The fields a problem can be laid at; the message names it and the field at fault is marked and focused.
-  const checkedFields = [rangeInput, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput, periodInput, trendWidthInput, ...errorAxes.flatMap(s => [s.amount, s.cells]), ...sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])];
+  const checkedFields = [rangeInput, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput, markerSizeInput, periodInput, trendWidthInput, ...errorAxes.flatMap(s => [s.amount, s.cells]), ...sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])];
   /** Reads the form into the draft; null, or { msg, fields } for what stops the chart. */
   function readForm() {
     const problem = (msg, ...fields) => ({ msg, fields });
@@ -390,6 +401,9 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     // The field is hidden for every type but histogram, so only a histogram is held up by what it says.
     if (draft.type === 'histogram' && !binsOk) return problem('Bins must be a whole number from 2 to 100', binsInput);
     draft.bins = binsOk ? bins : null;
+    const size = markerSizeInput.value.trim();
+    if (!markerSizeField.hidden && size !== '' && !(Number(size) >= 2 && Number(size) <= 72)) return problem('The marker size must be from 2 to 72 pt', markerSizeInput);
+    markerSize = size === '' || size === markerSizeShown ? null : Number(size);
     const period = Number(periodInput.value);
     if (!trendRow.hidden && trendSel.value === 'movingAvg' && !(Number.isInteger(period) && period >= 2 && period <= 255)) return problem('The period must be a whole number from 2 to 255', periodInput);
     const errorCheck = errorFields(readData().series.length);
@@ -437,7 +451,13 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     // Updating a heading must not replace the source's name reference or cache.
     sourceInputs.forEach((s, i) => { s.heading.textContent = data.series[i]?.name || s.source.name || `Series ${i + 1}`; });
     const labelPatch = labelsPatch(data);
-    const shown = { ...draft, ...trendFields(data.series.length), ...errorFields(data.series.length), ...(labelPatch?.appearance ? { appearance: labelPatch.appearance } : {}) };
+    if (markerSizeShown == null) {
+      const sizes = data.series.map((_, i) => chartSeriesLine(draft, i)?.markerSize ?? null);
+      markerSizeShown = sizes.length && sizes[0] != null && sizes.every(v => v === sizes[0]) ? String(sizes[0]) : '';
+      markerSizeInput.value = markerSizeShown;
+    }
+    let shown = { ...draft, ...trendFields(data.series.length), ...errorFields(data.series.length), ...(labelPatch?.appearance ? { appearance: labelPatch.appearance } : {}) };
+    shown = { ...shown, ...markerPatch(shown) };
     const errorValues = shown.errorBars ? chartErrorValues(wb, sheetId, shown) : null;
     preview.innerHTML = renderChartSvg(errorValues ? { ...data, errorValues } : data, shown, draft.appearance ? draft.w : 440, draft.appearance ? draft.h : 230);
     syncColors(data);
@@ -447,7 +467,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
   const refreshSoon = () => { clearTimeout(redraw); redraw = setTimeout(refresh, 150); };
   for (const input of sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])) input.addEventListener('input', refreshSoon);
   for (const input of [rangeInput, seriesSel, headersSel, categoriesSel, stackedBox, stack100Box, trendSel, orderSel, periodInput, eqBox, r2Box, trendDashSel, trendWidthInput, axis2Box, legendSel, labelsBox, hGridBox, vGridBox, smoothBox, hiddenBox, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput]) input.addEventListener('input', refresh);
-  for (const input of [titleInput, descriptionInput, xTitleInput, yTitleInput, y2TitleInput]) input.addEventListener('input', refreshSoon);
+  for (const input of [titleInput, descriptionInput, xTitleInput, yTitleInput, y2TitleInput, markerSizeInput]) input.addEventListener('input', refreshSoon);
   for (const s of errorAxes) { s.kind.addEventListener('change', refresh); s.amount.addEventListener('input', refresh); s.cells.addEventListener('input', refreshSoon); s.cells.addEventListener('change', refresh); }
   for (const input of [seriesSel, headersSel, categoriesSel, stackedBox, stack100Box, trendSel, orderSel, eqBox, r2Box, axis2Box, legendSel, labelsBox, hGridBox, vGridBox, smoothBox, hiddenBox]) input.addEventListener('change', refresh);
 
@@ -459,7 +479,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     const trend = { ...trendFields(readData().series.length), ...errorFields(readData().series.length) };
     if (chart) {
       const labelPatch = labelsPatch(readData());
-      wb.updateChart(sheetId, chart.id, {
+      const update = {
         type: draft.type, range: draft.range, title: draft.title, description: draft.description, seriesIn: draft.seriesIn, headers: draft.headers, categoryLabels: draft.categoryLabels, stacked: draft.stacked, stack100: draft.stack100, ...trend,
         legend: draft.legend, legendPos: draft.legendPos, labels: draft.labels, gridlines: draft.gridlines, xGridlines: draft.xGridlines, smooth: draft.smooth, xTitle: draft.xTitle, yTitle: draft.yTitle, y2Title: draft.y2Title,
         colors: draft.colors, yMin: draft.yMin, yMax: draft.yMax, bins: draft.bins, secondaryAxis: draft.secondaryAxis, includeHidden: draft.includeHidden,
@@ -469,7 +489,8 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
         ...(draft.appearance && draft.appearance !== chart.appearance ? { appearance: draft.appearance } : {}),
         ...(labelPatch?.appearance ? { appearance: labelPatch.appearance } : {}),
         ...(xyChart() ? chartXBoundsPatch({ appearance: labelPatch?.appearance || draft.appearance }, xBounds.min, xBounds.max) : {}),
-      });
+      };
+      wb.updateChart(sheetId, chart.id, { ...update, ...markerPatch({ ...chart, ...update }) });
       modal.close();
       ctx.grid.selectChart(chart.id);
       return;
@@ -491,7 +512,8 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
       place = { ...place, anchor: { r: r.r1, c: r.c2 + 1 } };
       if (place.anchor.c >= sheet.cols) wb.ensureSize(sheetId, sheet.rows, place.anchor.c + 1);
     }
-    const id = wb.addChart(sheetId, { ...draft, ...trend, ...place });
+    const fresh = { ...draft, ...trend, ...place };
+    const id = wb.addChart(sheetId, { ...fresh, ...markerPatch(fresh) });
     modal.close();
     ctx.grid.selectChart(id);
   };
@@ -512,7 +534,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
         el('div.row.row-2', { hidden: !!sourceInputs.length },
           el('label.field', {}, el('span.field-label', {}, 'Series in'), seriesSel),
           el('label.field', {}, el('span.field-label', {}, 'Labels'), headersSel)),
-        el('div.row.row-2', { hidden: !!sourceInputs.length }, categoriesField),
+        categoriesRow,
         axisRow,
         xBoundsRow,
         boundsRow,
@@ -523,6 +545,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
         el('div.row', {}, stackedField),
         trendRow,
         errorRow,
+        markerSizeRow,
         el('div.field', {}, el('span.field-label', {}, 'Colors'), colorsRow)),
       el('div.chart-form-preview', {}, el('span.field-label', {}, 'Preview'), preview)),
     el('div.row.row-end', {},
