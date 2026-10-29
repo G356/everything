@@ -119,6 +119,8 @@ const num = (description, extra = {}) => ({ type: 'number', description, ...extr
 const int = (description, extra = {}) => ({ type: 'integer', description, ...extra });
 const bool = (description) => ({ type: 'boolean', description });
 const RANGE = str('An A1 range such as "B2:D20", "A:A" or a single cell "C5", optionally with a sheet: "Sales!A1:F50" or "\'Q1 Data\'!B2". A named range or a table name works too. Without a sheet it means the active sheet.');
+// With series in rows, the first row: whether it labels the categories along the chart or plots as a series of its own.
+const FIRST_COLUMN = str('Whether the data\'s first column (first row, with series in rows) holds the category labels along the horizontal axis, such as years or x values, or is plotted as a series of its own (default: guessed).', { enum: ['categories', 'series', 'auto'] });
 const SHEET = str('Sheet name. Defaults to the active sheet.');
 const fn = (name, description, properties = {}, required = []) => ({
   type: 'function',
@@ -245,7 +247,7 @@ export const TOOLS = [
     destination: str('Top-left cell to put it at on an existing sheet, e.g. "Summary!A1". Default: a new sheet.'),
     new_sheet_name: str('Name for the new sheet (default "Pivot of <source sheet>").'),
   }, ['data_range', 'rows', 'values']),
-  fn('create_chart', 'Insert a chart drawn from a range. The first row and column are used as series names and categories when they hold text.', {
+  fn('create_chart', 'Insert a chart drawn from a range. The first row and column are used as series names and categories when they hold text; the first column also names the categories when it counts up evenly (years, steps 1, 2, 3).', {
     data_range: RANGE,
     type: str('Chart type.', { enum: CHART_TYPES.map(([t]) => t) }),
     title: str('Chart title.'),
@@ -254,12 +256,14 @@ export const TOOLS = [
     y_title: str('Vertical axis title.'),
     stacked: bool('Stack the series (column, bar, area).'),
     series_in: str('Whether each column or each row of the data is one series (default: guessed).', { enum: ['columns', 'rows'] }),
+    first_column: FIRST_COLUMN,
   }, ['data_range', 'type']),
   fn('update_chart', 'Change a chart: its type, data, titles, stacking, legend, position or size. Give only what changes; an empty title removes it.', {
     chart: str('The chart\'s id from get_sheet_details or get_workbook_info, or its title or name when no other chart shares it.'),
     type: str('New chart type.', { enum: CHART_TYPES.map(([t]) => t) }),
     data_range: str('New data range, on the chart\'s sheet, read as create_chart reads it.'),
     series_in: str('Whether each column or each row of the data is one series.', { enum: ['columns', 'rows', 'auto'] }),
+    first_column: FIRST_COLUMN,
     title: str('Chart title.'), x_title: str('Horizontal axis title.'), y_title: str('Vertical axis title.'),
     stacked: bool('Stack the series (column, bar, line, area).'),
     legend: str('Where the legend goes, or none.', { enum: ['bottom', 'top', 'right', 'none'] }),
@@ -910,6 +914,7 @@ function sheetDetails(wb, args, env) {
       ...(sheet.kind !== 'chart' && c.anchor ? { placed_at: cellName(c.anchor.r, c.anchor.c), size: `${Math.round(c.w)}×${Math.round(c.h)}px` } : {}),
       ...(t.xTitle ? { x_title: clip(t.xTitle, 200) } : {}), ...(t.yTitle ? { y_title: clip(t.yTitle, 200) } : {}),
       ...(c.stacked ? { stacked: c.stack100 ? '100%' : true } : {}), ...(c.seriesIn && c.seriesIn !== 'auto' ? { series_in: c.seriesIn === 'cols' ? 'columns' : 'rows' } : {}),
+      ...(typeof c.categoryLabels === 'boolean' ? { first_column: c.categoryLabels ? 'categories' : 'series' } : {}),
       ...(c.hidden ? { hidden: true } : {}),
     };
   });
@@ -2153,6 +2158,13 @@ function createPivotTable(wb, args, env) {
   };
 }
 
+/** A chart's categoryLabels from a call's first_column. */
+function firstColumnSetting(value) {
+  if (value == null || value === 'auto') return 'auto';
+  if (value === 'categories' || value === 'series') return value === 'categories';
+  throw new ToolError('first_column must be categories, series or auto.');
+}
+
 function createChart(wb, args, env) {
   const { sheetId, range } = resolveRange(wb, args.data_range, env.sheetId());
   assertWritable(wb, sheetId, null);
@@ -2172,6 +2184,7 @@ function createChart(wb, args, env) {
     type, range: data, title: cutText(args.title || '', 200), anchor, dx: 4, dy: 4, w: 480, h: 300,
     xTitle: cutText(args.x_title || '', 80), yTitle: cutText(args.y_title || '', 80),
     stacked: !!args.stacked, seriesIn: args.series_in === 'rows' ? 'rows' : args.series_in === 'columns' ? 'cols' : 'auto',
+    categoryLabels: firstColumnSetting(args.first_column),
   });
   if (id == null) throw new ToolError('The chart could not be added.');
   return { chart: `${type} chart of ${qualified(wb, sheetId, data)}`, id, placed_at: cellName(anchor.r, anchor.c) };
@@ -2261,6 +2274,12 @@ function updateChart(wb, args, env) {
     if (chart.sourceRefs?.length && args.data_range == null) throw new ToolError(`The chart's series read references of their own (${chartSource(chart)}), so they cannot be switched between rows and columns. Give a data_range to chart a range instead.`);
     patch.seriesIn = args.series_in === 'columns' ? 'cols' : args.series_in;
     changes.push(`series in ${args.series_in}`);
+  }
+  if (args.first_column != null) {
+    const setting = firstColumnSetting(args.first_column);
+    if (chart.sourceRefs?.length && args.data_range == null) throw new ToolError(`The chart's series read references of their own (${chartSource(chart)}), so it has no first column to read as categories. Give a data_range to chart a range instead.`);
+    patch.categoryLabels = setting;
+    changes.push(`first column read as ${args.first_column}`);
   }
   // A title typed here replaces one linked to a cell, as typing it in the chart does.
   if (args.title != null) { patch.title = cutText(String(args.title), 200); patch.titleRef = undefined; changes.push('title'); }

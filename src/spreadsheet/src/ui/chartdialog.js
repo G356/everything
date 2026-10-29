@@ -99,6 +99,8 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     labelsField.hidden = pieLike;
     gridField.hidden = pieLike || radar;
     smoothField.hidden = !['line', 'area', 'combo'].includes(draft.type);
+    // Points along x values, a hierarchy's levels and a histogram's bins have no category labels to pick.
+    categoriesField.hidden = xyChart() || ['treemap', 'sunburst', 'histogram'].includes(draft.type);
   };
 
   const rangeInput = el('input.input', { type: 'text', value: rangeName(draft.range), 'aria-label': 'Data range', spellcheck: false, autocomplete: 'off', placeholder: 'A1:B10 or a table name' });
@@ -121,6 +123,13 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     el('option', { value: 'true' }, 'First row is labels'),
     el('option', { value: 'false' }, 'No labels'));
   headersSel.value = String(draft.headers);
+  // Whether the first column (the first row, with series in rows) labels the categories or plots as a series.
+  const categoriesSel = el('select.select', { 'aria-label': 'Categories' },
+    el('option', { value: 'auto' }, 'Detect automatically'),
+    el('option', { value: 'true' }, 'First column'),
+    el('option', { value: 'false' }, 'None (number the points)'));
+  categoriesSel.value = String(draft.categoryLabels ?? 'auto');
+  const categoriesField = el('label.field', {}, el('span.field-label', {}, 'Categories'), categoriesSel);
   const stackedBox = el('input', { type: 'checkbox', checked: !!draft.stacked });
   const stack100Box = el('input', { type: 'checkbox', checked: !!draft.stack100 });
   // The trendline every series takes: the first series' kind and label to begin with. A chart whose series differ
@@ -346,6 +355,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     if (descriptionInput.value !== (draft.description || '')) draft.description = descriptionInput.value;
     draft.seriesIn = seriesSel.value;
     draft.headers = headersSel.value === 'auto' ? 'auto' : headersSel.value === 'true';
+    draft.categoryLabels = categoriesSel.value === 'auto' ? 'auto' : categoriesSel.value === 'true';
     draft.stacked = stackedBox.checked;
     draft.stack100 = stackedBox.checked && stack100Box.checked;
     draft.secondaryAxis = axis2Box.checked;
@@ -388,7 +398,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
   let dataCache = null;
   function readData() {
     const r = draft.range;
-    const key = [wb.version, r.r1, r.c1, r.r2, r.c2, draft.seriesIn, draft.headers, draft.type, draft.includeHidden, JSON.stringify(draft.sourceRefs), draft.titleRef, draft.xTitleRef, draft.yTitleRef, draft.y2TitleRef].join('|');
+    const key = [wb.version, r.r1, r.c1, r.r2, r.c2, draft.seriesIn, draft.headers, draft.categoryLabels, draft.type, draft.includeHidden, JSON.stringify(draft.sourceRefs), draft.titleRef, draft.xTitleRef, draft.yTitleRef, draft.y2TitleRef].join('|');
     if (key !== dataKey) { dataKey = key; dataCache = chartData(wb, sheetId, draft); }
     return dataCache;
   }
@@ -415,6 +425,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     }
     if (problem) { preview.replaceChildren(); return; }
     const data = readData();
+    categoriesSel.options[1].textContent = data.orientation === 'rows' ? 'First row' : 'First column';
     // Resolve linked names through the same live data as the legend and colors.
     // Updating a heading must not replace the source's name reference or cache.
     sourceInputs.forEach((s, i) => { s.heading.textContent = data.series[i]?.name || s.source.name || `Series ${i + 1}`; });
@@ -428,10 +439,10 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
   let redraw = 0;
   const refreshSoon = () => { clearTimeout(redraw); redraw = setTimeout(refresh, 150); };
   for (const input of sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])) input.addEventListener('input', refreshSoon);
-  for (const input of [rangeInput, seriesSel, headersSel, stackedBox, stack100Box, trendSel, orderSel, periodInput, eqBox, r2Box, trendDashSel, trendWidthInput, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput]) input.addEventListener('input', refresh);
+  for (const input of [rangeInput, seriesSel, headersSel, categoriesSel, stackedBox, stack100Box, trendSel, orderSel, periodInput, eqBox, r2Box, trendDashSel, trendWidthInput, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput]) input.addEventListener('input', refresh);
   for (const input of [titleInput, descriptionInput, xTitleInput, yTitleInput, y2TitleInput]) input.addEventListener('input', refreshSoon);
   for (const s of errorAxes) { s.kind.addEventListener('change', refresh); s.amount.addEventListener('input', refresh); s.cells.addEventListener('input', refreshSoon); s.cells.addEventListener('change', refresh); }
-  for (const input of [seriesSel, headersSel, stackedBox, stack100Box, trendSel, orderSel, eqBox, r2Box, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox]) input.addEventListener('change', refresh);
+  for (const input of [seriesSel, headersSel, categoriesSel, stackedBox, stack100Box, trendSel, orderSel, eqBox, r2Box, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox]) input.addEventListener('change', refresh);
 
   const submit = (e) => {
     e?.preventDefault();
@@ -442,7 +453,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     if (chart) {
       const labelPatch = labelsPatch(readData());
       wb.updateChart(sheetId, chart.id, {
-        type: draft.type, range: draft.range, title: draft.title, description: draft.description, seriesIn: draft.seriesIn, headers: draft.headers, stacked: draft.stacked, stack100: draft.stack100, ...trend,
+        type: draft.type, range: draft.range, title: draft.title, description: draft.description, seriesIn: draft.seriesIn, headers: draft.headers, categoryLabels: draft.categoryLabels, stacked: draft.stacked, stack100: draft.stack100, ...trend,
         legend: draft.legend, legendPos: draft.legendPos, labels: draft.labels, gridlines: draft.gridlines, smooth: draft.smooth, xTitle: draft.xTitle, yTitle: draft.yTitle, y2Title: draft.y2Title,
         colors: draft.colors, yMin: draft.yMin, yMax: draft.yMax, bins: draft.bins, secondaryAxis: draft.secondaryAxis, includeHidden: draft.includeHidden,
         ...(draft.sourceRefs ? { sourceRefs: draft.sourceRefs } : {}),
@@ -493,6 +504,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
         el('div.row.row-2', { hidden: !!sourceInputs.length },
           el('label.field', {}, el('span.field-label', {}, 'Series in'), seriesSel),
           el('label.field', {}, el('span.field-label', {}, 'Labels'), headersSel)),
+        el('div.row.row-2', { hidden: !!sourceInputs.length }, categoriesField),
         axisRow,
         xBoundsRow,
         boundsRow,

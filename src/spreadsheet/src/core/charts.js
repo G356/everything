@@ -19,6 +19,7 @@ import { normalizeAxisTickValues } from './axis-tick-values.js';
  *   w, h,                            size in unzoomed pixels (derived for move-and-size cellAnchor)
  *   seriesIn: 'auto' | 'cols' | 'rows',
  *   headers: 'auto' | true | false,  is the first row (or column) a header?
+ *   categoryLabels: 'auto' | true | false,  does the first column (or row) name the categories rather than plot as a series?
  *   legend: boolean, stacked: boolean, stack100: boolean (stacked to 100%), trendline: boolean,
  *   trendlines?: (trend | false)[], each series' trendline: its kind, forecast and label (see trendline.js)
  *   errorBars?: (null | { x?, y? })[],   a scatter or bubble series' error bars (see error-bars.js)
@@ -122,7 +123,7 @@ export const CHART_MIN_H = 120;
 export function defaultChart(range, anchor) {
   return {
     type: 'column', range: normalizeRange(range), title: '', anchor: { r: anchor.r, c: anchor.c }, dx: 8, dy: 6,
-    w: 480, h: 300, seriesIn: 'auto', headers: 'auto', legend: true, stacked: false, stack100: false, trendline: false, labels: false, xTitle: '', yTitle: '', y2Title: '',
+    w: 480, h: 300, seriesIn: 'auto', headers: 'auto', categoryLabels: 'auto', legend: true, stacked: false, stack100: false, trendline: false, labels: false, xTitle: '', yTitle: '', y2Title: '',
     colors: [], legendPos: 'bottom', gridlines: true, smooth: false, yMin: null, yMax: null, bins: null, includeHidden: false,
   };
 }
@@ -392,6 +393,7 @@ function normalizeChartBody(raw) {
     h: Math.max(cellAnchor ? 0 : raw.appearance ? 24 : CHART_MIN_H, num(raw.h, 300)),
     seriesIn: raw.seriesIn === 'cols' || raw.seriesIn === 'rows' ? raw.seriesIn : 'auto',
     headers: raw.headers === true || raw.headers === false ? raw.headers : 'auto',
+    categoryLabels: raw.categoryLabels === true || raw.categoryLabels === false ? raw.categoryLabels : 'auto',
     legend: raw.legend !== false,
     stacked: !!raw.stacked,
     stack100: !!raw.stack100,
@@ -809,6 +811,17 @@ function normalizeColors(list) {
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const isBlank = (v) => v == null || v === '';
+
+// The charts whose points stand along categories, where a column counting up evenly reads as their labels.
+const STEP_CATEGORY_TYPES = new Set(['column', 'bar', 'line', 'area', 'combo', 'pie', 'donut', 'radar', 'waterfall', 'funnel']);
+/** Three or more numbers, none blank, each the last plus the same positive step. */
+function evenSteps(values) {
+  if (values.length < 3 || !values.every(isNum)) return false;
+  const step = values[1] - values[0];
+  if (!(step > 0)) return false;
+  const tolerance = 1e-9 * Math.max(Math.abs(values[0]), Math.abs(values.at(-1)), step);
+  return values.every((v, i) => !i || Math.abs(v - values[i - 1] - step) <= tolerance);
+}
 // A cell beyond the sheet's used range, as chartData reads one: nothing lies there but blanks.
 const BLANK = Object.freeze({ v: null, text: '', dateLike: false, dateKind: null, style: null });
 
@@ -955,13 +968,16 @@ function chartSeriesData(wb, sheetId, chart) {
           points: pointAt0.slice(hasHeaders ? 1 : 0), xLine: null, sizeLine: null, lines: [lineAt0[column]] } };
     }
   }
-  // A first column of text (or dates) names the categories.
+  // A first column of text (or dates) names the categories, as does one headed column of evenly spaced numbers
+  // counting up (1, 2, 3 or 2019, 2020, 2021) on a chart along categories: years or steps, not a series of their own.
   let categoryCol = false;
   if (C >= 2) {
     const firstCol = body.map((row) => row[0]);
     const filled = firstCol.filter((x) => !isBlank(x.v));
     const textish = filled.filter((x) => !isNum(x.v) || x.dateLike).length;
-    categoryCol = filled.length > 0 && (textish >= filled.length / 2 || (blankCorner && hasHeaders));
+    if (chart.categoryLabels === true || chart.categoryLabels === false) categoryCol = chart.categoryLabels;
+    else categoryCol = filled.length > 0 && (textish >= filled.length / 2 || (blankCorner && hasHeaders)
+      || (hasHeaders && !isBlank(cells[0][0].v) && STEP_CATEGORY_TYPES.has(chart.type) && evenSteps(firstCol.map((x) => x.v))));
     if (chart.type === 'scatter' || chart.type === 'bubble') categoryCol = false;
   }
   const categories = body.map((row, i) => (categoryCol ? row[0].text || `${i + 1}` : `${i + 1}`));

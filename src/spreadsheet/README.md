@@ -123,7 +123,10 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   combo (columns with a line, which can read against its own axis on the
   right when the two series differ in scale), histogram (with a chosen bin count),
   waterfall, radar, and bubble (a third column sizes the points) charts
-  drawn from a range with detected headers and categories (or from ranges
+  drawn from a range with detected headers and categories (a first column of
+  text or dates, or of numbers under a header counting up evenly such as years or steps 1, 2, 3,
+  labels the categories rather than plotting as a line of its own, and the chart
+  dialog's Categories setting decides it either way; or from ranges
   selected together over the same rows, such as Month and Total; hidden and
   filtered-out rows and columns are left out unless the chart's Include
   hidden cells option is on), stacked or 100% stacked, with optional value labels, axis titles,
