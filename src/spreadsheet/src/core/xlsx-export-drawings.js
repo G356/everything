@@ -3,6 +3,7 @@ import { slicerFrameXml, nativePivotSlicerParts } from './xlsx-export-slicers.js
 /** DrawingML charts and pictures for readers which do not know the app's sidecar. */
 import { authoredBarGapWidth, chartPointStyle, chartData, chartXBounds, textBoxText } from './charts.js';
 import { INTERCEPT_TYPES, trendFor } from './trendline.js';
+import { errorBarsFor } from './error-bars.js';
 import { fontName, styleToNumFmt, formatValue, numFmtToStyle } from './format.js';
 import { xmlTag as tag, xmlText } from './xlsx-export-styles.js';
 import { renderChartSvg, standaloneSvg, seriesColor } from '../ui/chartsvg.js';
@@ -61,6 +62,19 @@ const lineShape = (style, background = '') => {
 // whose title carries it, even though CT_ManualLayout permits the element.
 const layout = (box, plotArea = false) => tag('c:layout', {}, box ? tag('c:manualLayout', {}, (plotArea ? val('layoutTarget', 'inner') : '') + val('xMode', 'edge') + val('yMode', 'edge')
   + val('wMode', 'factor') + val('hMode', 'factor') + ['x', 'y', 'w', 'h'].filter(k => Number.isFinite(box[k])).map(k => val(k, box[k])).join('')) : '');
+
+/**
+ * A scatter or bubble series' error bars on one axis (CT_ErrBars, its children in schema order). Custom
+ * amounts keep their reference, with the values read now as its cache, or else the chart's own numbers.
+ * The cap width has no place in the file: Excel draws its own.
+ */
+function errorBarsXml(bar, axis, custom) {
+  const amounts = (name, ref, values) => (ref || values ? vector(name, ref, values || [], true) : '');
+  return tag('c:errBars', {}, val('errDir', axis) + val('errBarType', bar.direction) + val('errValType', bar.type) + val('noEndCap', Number(!bar.caps))
+    + (bar.type === 'cust' ? amounts('plus', bar.plus, bar.plus ? custom?.plus : bar.plusValues) + amounts('minus', bar.minus, bar.minus ? custom?.minus : bar.minusValues) : '')
+    + (['fixedVal', 'percentage', 'stdDev'].includes(bar.type) ? val('val', bar.value) : '')
+    + lineShape({ color: bar.color, width: bar.width, dash: bar.dash }));
+}
 
 /** A series' trendline (CT_Trendline, its children in schema order); its equation label in General unless it has a format. */
 const trendlineXml = t => tag('c:trendline', {}, (t.name ? tag('c:name', {}, xmlText(t.name)) : '')
@@ -299,10 +313,8 @@ function chartXml(X, wb, sheet, ch) {
     }
     const trend = !circular && ['column', 'bar', 'line', 'area', 'scatter', 'bubble'].includes(type) ? trendFor(ch, i) : null;
     if (trend) body += trendlineXml(trend);
-    if (bubble) for (const error of bubble.errors || []) body += tag('c:errBars', {},
-      val('errDir', error.axis) + val('errBarType', error.direction) + val('errValType', error.type)
-      + val('noEndCap', Number(!error.caps)) + (error.type === 'stdErr' ? '' : val('val', error.value))
-      + lineShape({ color: error.color, width: error.width }));
+    const bars = ['scatter', 'bubble'].includes(type) ? errorBarsFor(ch, i) : null;
+    if (bars) for (const axis of ['x', 'y']) if (bars[axis]) body += errorBarsXml(bars[axis], axis, data.errorValues?.[i]?.[axis]);
     const xy = type === 'scatter' || type === 'bubble';
     const cats = xy ? series.x || data.x || data.categories.map((_, j) => j + 1) : ap.dateAxis ? series.x || data.x || [] : series.categories || data.categories;
     const source = refs[i], literals = source?.literal;

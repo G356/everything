@@ -1,6 +1,7 @@
 import { normalizeCellAnchor } from './drawing-cell-anchor.js';
 import { linkedChartText, normalizeLinkedChartText } from './chart-linked-text.js';
 import { normalizeTrendlines } from './trendline.js';
+import { errorBarValues, legacyBubbleErrorBars, normalizeErrorBars } from './error-bars.js';
 /**
  * Charts: the model of a chart placed on a sheet, and the pure step that
  * turns a range of cells into categories and series for drawing.
@@ -19,6 +20,7 @@ import { normalizeTrendlines } from './trendline.js';
  *   headers: 'auto' | true | false,  is the first row (or column) a header?
  *   legend: boolean, stacked: boolean, stack100: boolean (stacked to 100%), trendline: boolean,
  *   trendlines?: (trend | false)[], each series' trendline: its kind, forecast and label (see trendline.js)
+ *   errorBars?: (null | { x?, y? })[],   a scatter or bubble series' error bars (see error-bars.js)
  *   labels: boolean,                 write each value on its bar or point
  *   xTitle, yTitle, y2Title: string,          axis titles
  *   colors: (string|null)[],         a hex color per series (per slice for pies); null keeps the palette color
@@ -371,6 +373,8 @@ function normalizeChartBody(raw) {
   const type = CHART_TYPES.some(([t]) => t === raw.type) ? raw.type : 'column';
   const linkedText = normalizeLinkedChartText(raw.linkedText);
   const trendlines = raw.trendline ? normalizeTrendlines(raw.trendlines) : null;
+  // A bubble chart from a file once kept its error bars in its appearance; they are the chart's own now.
+  const errorBars = normalizeErrorBars(raw.errorBars) || (raw.errorBars === undefined ? legacyBubbleErrorBars(raw.appearance?.bubble) : null);
   return {
     id: raw.id,
     type,
@@ -392,6 +396,7 @@ function normalizeChartBody(raw) {
     stack100: !!raw.stack100,
     trendline: !!raw.trendline,
     ...(trendlines ? { trendlines } : {}),
+    ...(errorBars ? { errorBars } : {}),
     labels: !!raw.labels,
     xTitle: typeof raw.xTitle === 'string' ? raw.xTitle.slice(0, 80) : '',
     yTitle: typeof raw.yTitle === 'string' ? raw.yTitle.slice(0, 80) : '',
@@ -601,9 +606,6 @@ function normalizeAppearance(raw) {
         labels: { style: style(s?.labels?.style), value: !!s?.labels?.value, size: !!s?.labels?.size, category: !!s?.labels?.category,
           series: !!s?.labels?.series, position: position(s?.labels?.position) || 'ctr',
           points: points(s?.labels?.points).map(p => ({ index: p.index, hidden: !!p.hidden })) },
-        errors: (Array.isArray(s?.errors) ? s.errors : []).slice(0, 2).filter(e => ['x', 'y'].includes(e?.axis) && ['stdErr', 'stdDev', 'percentage', 'fixedVal'].includes(e?.type))
-          .map(e => ({ axis: e.axis, type: e.type, direction: ['plus', 'minus'].includes(e.direction) ? e.direction : 'both',
-            value: n(e.value, 0, 1e100, 1), caps: e.caps !== false, color: color(e.color) || '#000000', width: n(e.width, 0, 20, 1) })),
       })),
     } } : {}),
     dateAxis: !!raw.dateAxis, xStep: n(raw.xStep, .000001, 1e6, null), yStep: n(raw.yStep, .000001, 1e100, null),
@@ -662,6 +664,11 @@ export function mapChartReferences(chart, rewrite) {
   for (const key of ['tableRef', 'linkRef', 'textRef', 'pictureRef', 'titleRef', 'xTitleRef', 'yTitleRef', 'y2TitleRef']) if (chart[key]) {
     const ref = rewrite(chart[key]);
     if (ref !== chart[key]) chart = { ...chart, [key]: ref };
+  }
+  if (chart.errorBars?.some(b => b?.x?.plus || b?.x?.minus || b?.y?.plus || b?.y?.minus)) {
+    const errorBars = chart.errorBars.map(bars => bars && Object.fromEntries(Object.entries(bars).map(([axis, bar]) =>
+      [axis, { ...bar, ...(bar.plus ? { plus: rewrite(bar.plus) } : {}), ...(bar.minus ? { minus: rewrite(bar.minus) } : {}) }])));
+    if (JSON.stringify(errorBars) !== JSON.stringify(chart.errorBars)) chart = { ...chart, errorBars };
   }
   if (!chart.sourceRefs) return chart;
   let changed = false;
@@ -840,6 +847,21 @@ function hierarchyFromCells(cells, body, hasHeaders, C) {
  * A treemap or sunburst also has `levels`: each row's path of labels, outermost first.
  */
 export function chartData(wb, sheetId, chart) {
+  const data = chartSeriesData(wb, sheetId, chart);
+  const errors = chartErrorValues(wb, sheetId, chart);
+  return errors ? { ...data, errorValues: errors } : data;
+}
+
+/**
+ * The amounts a chart's custom error bars read from cells, point by point (see errorBarValues), lined up
+ * with the points as the series' own cells are: a series of its own references keeps a hidden cell's
+ * place, one read from the chart's range leaves it out.
+ */
+export function chartErrorValues(wb, sheetId, chart) {
+  return chart.errorBars ? errorBarValues(wb, sheetId, chart, { keepHidden: !!chart.sourceRefs?.length, includeHidden: chartIncludesHidden(chart) }) : null;
+}
+
+function chartSeriesData(wb, sheetId, chart) {
   const sheet = wb.sheet(sheetId);
   const empty = { categories: [], series: [], x: null, sizes: null, hasHeaders: false, orientation: 'cols', valueStyle: null, xStyle: null, sizeStyle: null };
   if (!sheet) return empty;

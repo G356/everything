@@ -9,6 +9,7 @@ import { chartData, chartXBounds } from './charts.js';
 import { quoteSheet } from './refs.js';
 import { CHART_LINE_GREY, CHART_TEXT_GREY, excelChartAppearance, subtypeOf } from './chart-subtypes.js';
 import { DEFAULT_TREND, TREND_TYPES, normalizeTrend, trendFor } from './trendline.js';
+import { errorBarsElementPatch, errorBarsState } from './error-bars.js';
 
 const PIE = new Set(['pie', 'donut']);
 const BARS = new Set(['column', 'bar', 'combo', 'histogram', 'waterfall']);
@@ -61,6 +62,8 @@ export function chartElementState(chart) {
     // The kind every series' trendline shares, or 'mixed'.
     trendline: !chart.trendline ? 'none' : (types => (types.size === 1 ? [...types][0] : 'mixed'))(
       new Set((chart.trendlines?.length ? chart.trendlines : [DEFAULT_TREND]).filter(Boolean).map(t => t.type))),
+    // The kind every error bar shares (or 'mixed', or 'none'), and which directions have them.
+    errorBars: errorBarsState(chart),
   };
 }
 
@@ -75,7 +78,7 @@ export function dataLabelPositions(chart) {
 
 /**
  * Add Chart Element: `element` names the submenu (axes, axisTitles, chartTitle, dataLabels, dataTable,
- * gridlines, legend, trendline) and `value` the choice. `seriesCount` sizes per-series settings.
+ * gridlines, legend, trendline, errorBars) and `value` the choice. `seriesCount` sizes per-series settings.
  */
 export function chartElementPatch(chart, element, value, { seriesCount = 1 } = {}) {
   const a = { ...(chart.appearance || {}) };
@@ -144,6 +147,8 @@ export function chartElementPatch(chart, element, value, { seriesCount = 1 } = {
       const trendlines = Array.from({ length: Math.max(seriesCount, chart.trendlines?.length || 0) }, (_, i) => normalizeTrend({ ...(trendFor(chart, i) || {}), type: value }));
       return done({ trendline: true, trendlines });
     }
+    // 'none', a kind for every bar, or { axis: 'x' | 'y', on } (see error-bars.js).
+    case 'errorBars': return errorBarsElementPatch(chart, value, seriesCount);
     default: return null;
   }
 }

@@ -5,7 +5,7 @@
  * selected edits the title in place; Delete removes the selected element.
  *
  * The element is a key: chartArea, plotArea, title, legend, xAxis, yAxis, y2Axis, xTitle, yTitle,
- * gridlines-x, gridlines-y, series:j, point:j:i, dataLabels:j, trendline:j, trendlineLabel:j (see chart-design.js).
+ * gridlines-x, gridlines-y, series:j, point:j:i, dataLabels:j, trendline:j, trendlineLabel:j, errorBars:j (see chart-design.js).
  */
 import { el, isComposing } from './dom.js';
 import { icon } from './icons.js';
@@ -15,13 +15,14 @@ import { seriesColor } from './chartsvg.js';
 import { chartData, chartTitles, chartXBounds, chartXBoundsPatch, CHART_DASH_CHOICES, CHART_DISPLAY_UNITS } from '../core/charts.js';
 import { chartElementPatch, dataLabelPositions, elementFormatPatch, isPieChart, trendlineAllowed, trendlinePatch } from '../core/chart-design.js';
 import { INTERCEPT_TYPES, TREND_TYPES, trendFor, trendName, trendProblem } from '../core/trendline.js';
+import { ERROR_BAR_CAP_WIDTH, ERROR_BAR_COLOR, ERROR_BAR_TYPES, errorBarAmountInput, errorBarsAllowed, errorBarsFor, errorBarsPatch, normalizeErrorBars } from '../core/error-bars.js';
 import { barSpacing } from '../core/chart-subtypes.js';
 
 const PANE_TITLES = { chartArea: 'Format Chart Area', plotArea: 'Format Plot Area', title: 'Format Chart Title', legend: 'Format Legend',
   xAxis: 'Format Axis', yAxis: 'Format Axis', y2Axis: 'Format Axis', xTitle: 'Format Axis Title', yTitle: 'Format Axis Title',
   'gridlines-x': 'Format Gridlines', 'gridlines-y': 'Format Gridlines' };
 const KEY_TITLES = [[/^series:/, 'Format Data Series'], [/^point:/, 'Format Data Point'], [/^dataLabels:/, 'Format Data Labels'],
-  [/^trendline:/, 'Format Trendline'], [/^trendlineLabel:/, 'Format Trendline Label']];
+  [/^trendline:/, 'Format Trendline'], [/^trendlineLabel:/, 'Format Trendline Label'], [/^errorBars:/, 'Format Error Bars']];
 const AXIS_KEYS = ['xAxis', 'yAxis', 'y2Axis'];
 /** An axis named by where it runs and what it measures: a scatter chart's both axes measure values, a bar chart's categories run down the side. */
 export function axisName(chart, key) {
@@ -43,7 +44,7 @@ export function elementForNode(node, previous = null) {
     return `series:${j}`;
   }
   if (kind === 'dataLabels') return `dataLabels:${j ?? 0}`;
-  if ((kind === 'trendline' || kind === 'trendlineLabel') && j != null) return `${kind}:${j}`;
+  if ((kind === 'trendline' || kind === 'trendlineLabel' || kind === 'errorBars') && j != null) return `${kind}:${j}`;
   return kind;
 }
 
@@ -54,7 +55,7 @@ function nodesFor(svg, key) {
   if (m) return [...svg.querySelectorAll(`[data-el="series"][data-series="${m[1]}"]`)];
   m = /^point:(\d+):(\d+)$/.exec(key);
   if (m) return [...svg.querySelectorAll(`[data-el="series"][data-series="${m[1]}"][data-point="${m[2]}"]`)];
-  m = /^(dataLabels|trendline|trendlineLabel):(\d+)$/.exec(key);
+  m = /^(dataLabels|trendline|trendlineLabel|errorBars):(\d+)$/.exec(key);
   if (m) return [...svg.querySelectorAll(`[data-el="${m[1]}"][data-series="${m[2]}"]`)];
   if (key === 'chartArea') return [];
   return [...svg.querySelectorAll(`[data-el="${key}"]`)];
@@ -202,6 +203,16 @@ export function createChartUi(ctx) {
       setElement('chartArea', { announce: false });
       return true;
     }
+    // Delete takes a series' error bars away, both directions.
+    const errors = /^errorBars:(\d+)$/.exec(element);
+    if ((e.key === 'Delete' || e.key === 'Backspace') && errors) {
+      e.preventDefault();
+      const j = +errors[1], list = (chart.errorBars || []).slice();
+      list[j] = null;
+      if (errorBarsFor(chart, j)) ctx.run('chart', { action: 'patch', patch: { errorBars: normalizeErrorBars(list) || undefined }, label: 'Delete error bars' });
+      setElement('chartArea', { announce: false });
+      return true;
+    }
     if ((e.key === 'Delete' || e.key === 'Backspace') && element !== 'chartArea') {
       const removal = {
         title: ['chartTitle', 'none'], legend: ['legend', 'none'],
@@ -261,7 +272,7 @@ export function createChartUi(ctx) {
   const format = opts => { const chart = activeChart(ctx); if (chart) apply(elementFormatPatch(chart, paneKey, { ...opts, rings: ringCountOf(ctx.wb, ctx.sheetId(), chart) })); };
 
   function section(title, ...content) {
-    return el('details.chart-pane-section', { open: true }, el('summary', {}, title), el('div.chart-pane-fields', {}, ...content.flat().filter(Boolean)));
+    return el('details.chart-pane-section', { open: true }, el('summary', {}, title), el('div.chart-pane-fields', {}, ...content.flat(Infinity).filter(Boolean)));
   }
   const field = (label, control) => el('label.chart-pane-field', {}, el('span', {}, label), control);
   const color = (label, value, onPick) => {
@@ -298,8 +309,8 @@ export function createChartUi(ctx) {
 
   /** Fill & Line for the element: its fill (where it has one) and its border or line. */
   function fillAndLine(chart, key) {
-    // A trendline's line is set in its own options.
-    if (/^trendline/.test(key)) return null;
+    // A trendline's line, and error bars', are set in their own options.
+    if (/^(trendline|errorBars)/.test(key)) return null;
     const a = chart.appearance || {};
     const seriesIndex = /^(?:series|point):(\d+)/.exec(key)?.[1];
     const lineOnly = /^(xAxis|yAxis|y2Axis|gridlines-)/.test(key) || (seriesIndex != null && ['line', 'scatter', 'radar'].includes(chart.type) && !/^point/.test(key));
@@ -395,6 +406,67 @@ export function createChartUi(ctx) {
       number('Width (pt)', Math.round((t.width ?? 1.5) * 3 / 4 * 100) / 100, v => { if (v != null && v >= 0.25 && v <= 15) set({ width: Math.round(v * 4 / 3 * 100) / 100 }); }, { min: 0.25, max: 15, step: 0.25, placeholder: '' }),
       choice('Dash type', t.dash || 'auto', [['auto', 'Automatic'], ...CHART_DASH_CHOICES],
         v => set({ dash: v === 'auto' ? undefined : v })))];
+  }
+
+  /**
+   * Format Error Bars: a series' vertical and horizontal bars, each on or off, with its direction, end
+   * caps, amount (a fixed value, a percentage, standard deviations, the standard error, or amounts from
+   * cells) and line.
+   */
+  function errorBarOptions(chart, j) {
+    if (!errorBarsAllowed(chart)) return [el('p.chart-pane-note', {}, 'Error bars go on scatter and bubble charts.')];
+    const sheetId = ctx.sheetId(), data = chartData(ctx.wb, sheetId, chart), count = seriesCountOf(ctx.wb, sheetId, chart);
+    const bars = errorBarsFor(chart, j) || {};
+    const set = (axis, bar, label = 'Format error bars') => apply(errorBarsPatch(chart, j, axis, bar, count), label);
+    // The two directions show the same fields: each control is named for its own, so focus finds it again.
+    const named = (node, label) => { node.querySelector('input, select')?.setAttribute('aria-label', label); return node; };
+    const pt = px => Math.round(px * 3 / 4 * 100) / 100, px = v => Math.round(v * 4 / 3 * 100) / 100;
+    const picker = data.series.length > 1 ? el('div.chart-pane-fields', {},
+      choice('Series', String(j), data.series.map((s, k) => [String(k), s.name]), v => setElement(`errorBars:${v}`)),
+      errorBarsFor(chart, j) ? el('button.btn.btn-sm', { type: 'button', onclick: () => apply({ errorBars: normalizeErrorBars(Array.from({ length: count }, () => bars)) || undefined }, 'Apply error bars to all series') },
+        'Apply to all series') : null) : null;
+    const axisSection = (axis, title, word) => {
+      const bar = bars[axis];
+      const show = checkbox(`Show ${word.toLowerCase()} error bars`, !!bar,
+        on => set(axis, on ? bar || bars[axis === 'x' ? 'y' : 'x'] || { type: 'stdErr' } : null, on ? 'Add error bars' : 'Delete error bars'));
+      if (!bar) return section(title, show);
+      const update = patch => set(axis, patch);
+      // A custom amount: cells (=Sheet1!$D$2:$D$9) or numbers (0.5, or 1, 2, 3); one amount stands for every point.
+      const amountField = (label, side) => {
+        const ref = bar[side], values = bar[`${side}Values`];
+        const input = el('input.input', { type: 'text', value: ref ? `=${ref}` : values ? values.join(', ') : '', placeholder: '=Sheet1!$D$2:$D$10', 'aria-label': `${word} ${label.toLowerCase()}` });
+        const note = el('p.chart-pane-note', { role: 'alert', hidden: true });
+        input.addEventListener('change', () => {
+          const result = errorBarAmountInput(ctx.wb, sheetId, input.value, side);
+          note.hidden = !result.error;
+          note.textContent = result.error || '';
+          if (!result.error) update(result);
+        });
+        return [field(label, input), note];
+      };
+      const amount = {
+        fixedVal: () => named(number('Fixed value', bar.value, v => { if (v != null && v >= 0) update({ value: v }); }, { min: 0, placeholder: '' }), `${word} fixed value`),
+        percentage: () => named(number('Percentage (%)', bar.value, v => { if (v != null && v >= 0) update({ value: v }); }, { min: 0, placeholder: '' }), `${word} percentage`),
+        stdDev: () => named(number('Standard deviation(s)', bar.value, v => { if (v != null && v >= 0) update({ value: v }); }, { min: 0, placeholder: '' }), `${word} standard deviations`),
+        stdErr: () => null,
+        cust: () => [amountField('Positive error value', 'plus'), amountField('Negative error value', 'minus'),
+          el('p.chart-pane-note', {}, 'A range of cells gives each point its own amount; a single cell or number, every point the same.')],
+      }[bar.type]();
+      return section(title, show,
+        named(choice('Direction', bar.direction, [['both', 'Both'], ['minus', 'Minus'], ['plus', 'Plus']], v => update({ direction: v })), `${word} error bar direction`),
+        named(choice('End Style', bar.caps ? 'cap' : 'none', [['cap', 'Cap'], ['none', 'No Cap']], v => update({ caps: v === 'cap' })), `${word} error bar end style`),
+        bar.caps ? named(number('Cap width (pt)', pt(bar.capWidth ?? ERROR_BAR_CAP_WIDTH), v => { if (v != null && v >= 0 && v <= 72) update({ capWidth: px(v) }); },
+          { min: 0, max: 72, step: 0.5, placeholder: '' }), `${word} error bar cap width (pt)`) : null,
+        el('h3.chart-pane-sub', {}, 'Error Amount'),
+        named(choice('Error amount', bar.type, ERROR_BAR_TYPES, v => update({ type: v })), `${word} error amount`),
+        amount,
+        el('h3.chart-pane-sub', {}, 'Line'),
+        named(color('Line Color', bar.color || ERROR_BAR_COLOR, v => update({ color: v })), `${word} error bar color`),
+        named(number('Width (pt)', pt(bar.width ?? 1), v => { if (v != null && v >= 0.25 && v <= 15) update({ width: px(v) }); }, { min: 0.25, max: 15, step: 0.25, placeholder: '' }),
+          `${word} error bar width (pt)`),
+        named(choice('Dash type', bar.dash || 'solid', CHART_DASH_CHOICES, v => update({ dash: v === 'solid' ? undefined : v })), `${word} error bar dash type`));
+    };
+    return [picker, axisSection('y', 'Vertical Error Bars', 'Vertical'), axisSection('x', 'Horizontal Error Bars', 'Horizontal')].filter(Boolean);
   }
 
   /** Format Trendline Label: what it shows and the number format it shows it in. */
@@ -529,6 +601,8 @@ export function createChartUi(ctx) {
           checkbox('Percentage', l.percent, on => setPie({ percent: on })), checkbox('Show Leader Lines', l.leaderLines, on => setPie({ leaderLines: on })),
           choice('Label Position', l.position, dataLabelPositions(chart), v => setPie({ position: v }))));
       }
+    } else if (/^errorBars:\d+$/.test(key)) {
+      out.push(...errorBarOptions(chart, +key.split(':')[1]));
     } else if (/^trendline:\d+$/.test(key)) {
       out.push(...trendlineOptions(chart, +key.split(':')[1]));
     } else if (/^trendlineLabel:\d+$/.test(key)) {

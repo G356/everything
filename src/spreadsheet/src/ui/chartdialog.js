@@ -8,11 +8,12 @@ import { el, fieldId, isComposing } from './dom.js';
 import { icon } from './icons.js';
 import { openModal } from './modal.js';
 import { renderChartSvg, seriesColor } from './chartsvg.js';
-import { CHART_DASH_CHOICES, CHART_DESCRIPTION_MAX_LENGTH, CHART_TYPES, chartData, chartTitles, chartXBounds, chartXBoundsPatch, defaultChart, normalizeChart } from '../core/charts.js';
+import { CHART_DASH_CHOICES, CHART_DESCRIPTION_MAX_LENGTH, CHART_TYPES, chartErrorValues, chartData, chartTitles, chartXBounds, chartXBoundsPatch, defaultChart, normalizeChart } from '../core/charts.js';
 import { parseRange, rangeName } from '../core/cell.js';
 import { changeSubtypePatch } from '../core/chart-subtypes.js';
 import { chartElementPatch, trendlineAllowed } from '../core/chart-design.js';
 import { DEFAULT_TREND, TREND_TYPES, normalizeTrend, trendFor } from '../core/trendline.js';
+import { ERROR_BAR_DEFAULT_VALUES, ERROR_BAR_TYPES, errorBarAmountInput, normalizeErrorBar, normalizeErrorBars } from '../core/error-bars.js';
 
 const TYPE_ICONS = { column: 'chartColumn', bar: 'chartBar', line: 'chartLine', area: 'chartArea', pie: 'chartPie', donut: 'chartPie', scatter: 'chartScatter', combo: 'chartCombo', histogram: 'chartHistogram', waterfall: 'chartWaterfall', radar: 'chartRadar', bubble: 'chartBubble',
   treemap: 'chartTreemap', sunburst: 'chartSunburst', boxWhisker: 'chartBoxWhisker', funnel: 'chartFunnel', stock: 'chartStockOhlc', surface: 'chartSurface' };
@@ -81,6 +82,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     // A chart in the app's own style draws trendlines on columns, lines and points; one in Excel's style wherever Excel does.
     trendRow.hidden = !trendlineAllowed({ type: draft.type, stacked: stackableChecked() }) || !draft.appearance && !['column', 'line', 'scatter'].includes(draft.type);
     syncTrend();
+    errorRow.hidden = !['scatter', 'bubble'].includes(draft.type);
     axis2Field.hidden = draft.type !== 'combo';
     stackedField.hidden = stackedOnly.hidden && stack100Field.hidden && axis2Field.hidden;
     const pieLike = draft.type === 'pie' || draft.type === 'donut';
@@ -236,6 +238,57 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
       dash: trendDashSel.value === 'auto' ? undefined : trendDashSel.value, width: widthPt == null ? undefined : Math.round(widthPt * 4 / 3 * 100) / 100 };
     return { trendline: true, trendlines: Array.from({ length: Math.max(1, count, draft.trendlines?.length || 0) }, (_, j) => normalizeTrend({ ...(trendFor(draft, j) || {}), ...chosen })) };
   }
+  // Error bars on a scatter or bubble chart, up and down and to each side: every series takes the kind and
+  // amount chosen here, as it does the trendline; Format Error Bars sets each series' own.
+  const errorAxes = [['y', 'Vertical'], ['x', 'Horizontal']].map(([axis, word]) => {
+    const first = (draft.errorBars || []).find(b => b?.[axis])?.[axis] || null;
+    const kind = el('select.select', { 'aria-label': `${word} error bars` }, el('option', { value: 'none' }, 'None'),
+      ...ERROR_BAR_TYPES.map(([value, label]) => el('option', { value }, label)));
+    kind.value = first?.type || 'none';
+    const amount = el('input.input', { type: 'number', min: 0, step: 'any', 'aria-label': `${word} error amount`, value: first && first.type !== 'cust' ? first.value : '' });
+    const cells = el('input.input', { type: 'text', 'aria-label': `${word} error cells`, placeholder: '=Sheet1!$D$2:$D$10',
+      value: first?.plus ? `=${first.plus}` : first?.plusValues ? first.plusValues.join(', ') : '' });
+    const amountLabel = el('span.field-label', {});
+    const amountField = el('label.field', {}, amountLabel, amount), cellsField = el('label.field', {}, el('span.field-label', {}, `${word} error cells`), cells);
+    const state = { axis, word, kind, amount, cells, touched: false, fields: [el('label.field', {}, el('span.field-label', {}, `${word} error bars`), kind), amountField, cellsField] };
+    state.sync = () => {
+      amountField.hidden = !['fixedVal', 'percentage', 'stdDev'].includes(kind.value);
+      cellsField.hidden = kind.value !== 'cust';
+      amountLabel.textContent = { fixedVal: `${word} error amount`, percentage: `${word} error percentage (%)`, stdDev: `${word} standard deviations` }[kind.value] || '';
+    };
+    // A kind picked anew starts at its own amount (5 %, not the 1 a fixed value had).
+    kind.addEventListener('change', () => { if (state.lastKind !== kind.value) amount.value = ERROR_BAR_DEFAULT_VALUES[kind.value] ?? ''; state.lastKind = kind.value; });
+    state.lastKind = kind.value;
+    for (const input of [kind, amount, cells]) {
+      input.addEventListener('input', () => { state.touched = true; state.sync(); });
+      input.addEventListener('change', () => { state.touched = true; state.sync(); });
+    }
+    state.sync();
+    return state;
+  });
+  const errorRow = el('div.row.row-2', {}, ...errorAxes.flatMap(s => s.fields));
+  /** The error bar fields for a chart of `count` series, as the chart had them until the form changes them; or { error, field }. */
+  function errorFields(count) {
+    if (errorRow.hidden || !errorAxes.some(s => s.touched)) return { errorBars: draft.errorBars };
+    const list = Array.from({ length: Math.max(1, count, draft.errorBars?.length || 0) }, (_, j) => ({ ...(draft.errorBars?.[j] || {}) }));
+    for (const s of errorAxes) {
+      if (!s.touched) continue;
+      if (s.kind.value === 'none') { list.forEach(bars => delete bars[s.axis]); continue; }
+      let fields = {};
+      if (s.kind.value === 'cust') {
+        const plus = errorBarAmountInput(wb, sheetId, s.cells.value, 'plus');
+        if (plus.error || !s.cells.value.trim()) return { error: plus.error || `Enter the cells that hold the ${s.word.toLowerCase()} error amounts`, field: s.cells };
+        const minus = errorBarAmountInput(wb, sheetId, s.cells.value, 'minus');
+        fields = { ...plus, ...minus };
+      } else if (s.kind.value !== 'stdErr') {
+        const v = Number(s.amount.value);
+        if (s.amount.value.trim() === '' || !Number.isFinite(v) || v < 0) return { error: `The ${s.word.toLowerCase()} error amount must be a number of 0 or more`, field: s.amount };
+        fields = { value: v };
+      }
+      list.forEach(bars => { bars[s.axis] = normalizeErrorBar({ ...(bars[s.axis] || {}), type: s.kind.value, ...fields }); });
+    }
+    return { errorBars: normalizeErrorBars(list) || undefined };
+  }
   const labelsField = el('label.check', {}, labelsBox, el('span', {}, 'Show values'));
   const xTitleInput = el('input.input', { type: 'text', value: draft.xTitle || '', 'aria-label': 'Horizontal axis title', placeholder: 'Optional', maxlength: 80 });
   const yTitleInput = el('input.input', { type: 'text', value: draft.yTitle || '', 'aria-label': 'Vertical axis title', placeholder: 'Optional', maxlength: 80 });
@@ -246,7 +299,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     el('label.field', {}, el('span.field-label', {}, 'Vertical axis title'), yTitleInput), y2TitleField);
 
   // The fields a problem can be laid at; the message names it and the field at fault is marked and focused.
-  const checkedFields = [rangeInput, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput, periodInput, trendWidthInput, ...sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])];
+  const checkedFields = [rangeInput, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput, periodInput, trendWidthInput, ...errorAxes.flatMap(s => [s.amount, s.cells]), ...sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])];
   /** Reads the form into the draft; null, or { msg, fields } for what stops the chart. */
   function readForm() {
     const problem = (msg, ...fields) => ({ msg, fields });
@@ -322,6 +375,8 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     draft.bins = binsOk ? bins : null;
     const period = Number(periodInput.value);
     if (!trendRow.hidden && trendSel.value === 'movingAvg' && !(Number.isInteger(period) && period >= 2 && period <= 255)) return problem('The period must be a whole number from 2 to 255', periodInput);
+    const errorCheck = errorFields(readData().series.length);
+    if (errorCheck.error) return problem(errorCheck.error, errorCheck.field);
     const trendWidth = trendWidthInput.value.trim() === '' ? null : Number(trendWidthInput.value);
     if (!trendRow.hidden && trendSel.value !== 'none' && trendWidth != null && !(trendWidth >= 0.25 && trendWidth <= 15)) return problem('The trendline width must be from 0.25 to 15 pt', trendWidthInput);
     return null;
@@ -364,8 +419,9 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     // Updating a heading must not replace the source's name reference or cache.
     sourceInputs.forEach((s, i) => { s.heading.textContent = data.series[i]?.name || s.source.name || `Series ${i + 1}`; });
     const labelPatch = labelsPatch(data);
-    const shown = { ...draft, ...trendFields(data.series.length), ...(labelPatch?.appearance ? { appearance: labelPatch.appearance } : {}) };
-    preview.innerHTML = renderChartSvg(data, shown, draft.appearance ? draft.w : 440, draft.appearance ? draft.h : 230);
+    const shown = { ...draft, ...trendFields(data.series.length), ...errorFields(data.series.length), ...(labelPatch?.appearance ? { appearance: labelPatch.appearance } : {}) };
+    const errorValues = shown.errorBars ? chartErrorValues(wb, sheetId, shown) : null;
+    preview.innerHTML = renderChartSvg(errorValues ? { ...data, errorValues } : data, shown, draft.appearance ? draft.w : 440, draft.appearance ? draft.h : 230);
     syncColors(data);
   }
   // Typing a title redraws the preview once the typing pauses, not on every character.
@@ -374,6 +430,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
   for (const input of sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])) input.addEventListener('input', refreshSoon);
   for (const input of [rangeInput, seriesSel, headersSel, stackedBox, stack100Box, trendSel, orderSel, periodInput, eqBox, r2Box, trendDashSel, trendWidthInput, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput]) input.addEventListener('input', refresh);
   for (const input of [titleInput, descriptionInput, xTitleInput, yTitleInput, y2TitleInput]) input.addEventListener('input', refreshSoon);
+  for (const s of errorAxes) { s.kind.addEventListener('change', refresh); s.amount.addEventListener('input', refresh); s.cells.addEventListener('input', refreshSoon); s.cells.addEventListener('change', refresh); }
   for (const input of [seriesSel, headersSel, stackedBox, stack100Box, trendSel, orderSel, eqBox, r2Box, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox]) input.addEventListener('change', refresh);
 
   const submit = (e) => {
@@ -381,7 +438,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     if (!canChange()) return;
     const problem = readForm();
     if (problem) { refresh(); problem.fields[0].focus(); return; }
-    const trend = trendFields(readData().series.length);
+    const trend = { ...trendFields(readData().series.length), ...errorFields(readData().series.length) };
     if (chart) {
       const labelPatch = labelsPatch(readData());
       wb.updateChart(sheetId, chart.id, {
@@ -445,6 +502,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
           el('div.field', {}, el('span.field-label', {}, 'Options'), el('div.check-group', {}, labelsField, gridField, smoothField, hiddenField))),
         el('div.row', {}, stackedField),
         trendRow,
+        errorRow,
         el('div.field', {}, el('span.field-label', {}, 'Colors'), colorsRow)),
       el('div.chart-form-preview', {}, el('span.field-label', {}, 'Preview'), preview)),
     el('div.row.row-end', {},

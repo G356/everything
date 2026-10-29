@@ -16,6 +16,7 @@ import { CHART_STYLES, chartElementPatch, chartElementState, chartStylePatch, co
   quickLayoutPatch, quickLayoutsFor, trendlineAllowed } from '../core/chart-design.js';
 import { themedSeriesColors } from '../core/workbook-theme.js';
 import { TREND_TYPES, trendFor } from '../core/trendline.js';
+import { errorBarsAllowed, errorBarsFor } from '../core/error-bars.js';
 import { arrangeGroup } from './arrange-ribbon.js';
 
 const run = (ctx, arg) => ctx.run('chart', arg);
@@ -101,6 +102,16 @@ function addElementMenu(ctx) {
       radio('None', state.dataTable === 'none', el2('dataTable', 'none')),
       radio('With Legend Keys', state.dataTable === 'keys', el2('dataTable', 'keys')),
       radio('No Legend Keys', state.dataTable === 'noKeys', el2('dataTable', 'noKeys'))] : [], !axes || !styled),
+    // A kind for every bar, and each direction on or off; the pane sets each series' bars on their own.
+    sub('Error Bars', 'chartScatter', errorBarsAllowed(chart) ? [
+      radio('None', state.errorBars.kind === 'none', el2('errorBars', 'none')),
+      radio('Standard Error', state.errorBars.kind === 'stdErr', el2('errorBars', 'stdErr')),
+      radio('Percentage', state.errorBars.kind === 'percentage', el2('errorBars', 'percentage')),
+      radio('Standard Deviation', state.errorBars.kind === 'stdDev', el2('errorBars', 'stdDev')),
+      { separator: true },
+      check('Vertical Error Bars', state.errorBars.y, el2('errorBars', { axis: 'y', on: !state.errorBars.y })),
+      check('Horizontal Error Bars', state.errorBars.x, el2('errorBars', { axis: 'x', on: !state.errorBars.x })),
+      { separator: true }, { label: 'More Error Bars Options…', cmd: 'chart', arg: { action: 'formatPane', element: 'errorBars:0' } }] : [], !errorBarsAllowed(chart)),
     sub('Gridlines', 'gridlines', axes ? [
       check('Horizontal Lines', state.gridlines.horizontal, el2('gridlines', { axis: 'horizontal', on: !state.gridlines.horizontal }),
         { disabled: !can('gridlines', { axis: 'horizontal', on: true }) }),
@@ -201,6 +212,8 @@ export function elementLabel(key, names = []) {
   if (m) return `Series "${names[+m[1]] ?? +m[1] + 1}" Data Labels`;
   m = /^(trendline|trendlineLabel):(\d+)$/.exec(key);
   if (m) return `Series "${names[+m[2]] ?? +m[2] + 1}" Trendline 1${m[1] === 'trendlineLabel' ? ' Label' : ''}`;
+  m = /^errorBars:(\d+)$/.exec(key);
+  if (m) return `Series "${names[+m[1]] ?? +m[1] + 1}" Error Bars`;
   return key;
 }
 
@@ -213,7 +226,8 @@ export function chartElementKeys(chart, seriesCount) {
     ...(axes && chart.gridlines !== false ? ['gridlines-y'] : []), ...(axes && a.xGridlines ? ['gridlines-x'] : []),
     ...Array.from({ length: isPieChart(chart) ? 1 : seriesCount }, (_, j) => `series:${j}`),
     ...Array.from({ length: trendlineAllowed(chart) ? seriesCount : 0 }, (_, j) => trendFor(chart, j)).flatMap((t, j) => (!t ? []
-      : t.type !== 'movingAvg' && (t.dispEq || t.dispRSqr) ? [`trendline:${j}`, `trendlineLabel:${j}`] : [`trendline:${j}`]))];
+      : t.type !== 'movingAvg' && (t.dispEq || t.dispRSqr) ? [`trendline:${j}`, `trendlineLabel:${j}`] : [`trendline:${j}`])),
+    ...Array.from({ length: seriesCount }, (_, j) => j).filter(j => errorBarsFor(chart, j)).map(j => `errorBars:${j}`)];
 }
 
 const STANDARD = ['#c00000', '#ff0000', '#ffc000', '#ffff00', '#92d050', '#00b050', '#00b0f0', '#0070c0', '#002060', '#7030a0'];

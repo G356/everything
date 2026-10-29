@@ -147,6 +147,38 @@ function trendlineOf(series, lineColor) {
     dash: val(ln, 'prstDash'),
   });
 }
+/**
+ * A scatter or bubble series' error bars (see error-bars.js): { x?, y? } from its c:errBars, or null. A
+ * custom amount keeps its reference, or the numbers the file holds when it has none.
+ */
+function errorBarsOf(series, lineColor) {
+  const out = {};
+  for (const e of children(series, 'errBars')) {
+    const axis = val(e, 'errDir') || 'y';
+    if (!['x', 'y'].includes(axis) || out[axis]) continue;
+    const ln = path(e, 'spPr', 'ln'), color = ln ? lineColor(ln) : null;
+    const side = name => {
+      const node = child(e, name), ref = text(path(node, 'numRef', 'f'));
+      if (ref) return { ref };
+      const points = path(node, 'numLit') || path(node, 'numRef', 'numCache');
+      if (!points) return null;
+      const values = [];
+      for (const pt of children(points, 'pt')) {
+        const idx = Number(pt.attrs.idx), v = Number(text(child(pt, 'v')));
+        if (Number.isInteger(idx) && idx >= 0 && idx < 5000) values[idx] = Number.isFinite(v) ? v : null;
+      }
+      return { values: Array.from(values, v => v ?? null) };
+    };
+    const plus = side('plus'), minus = side('minus');
+    out[axis] = {
+      type: val(e, 'errValType') || 'fixedVal', direction: val(e, 'errBarType') || 'both', value: number(e, 'val') ?? undefined, caps: !flag(e, 'noEndCap'),
+      ...(color && color !== 'none' ? { color } : {}), ...(Number(ln?.attrs.w) > 0 ? { width: Number(ln.attrs.w) / 9525 } : {}), dash: val(ln, 'prstDash'),
+      ...(plus?.ref ? { plus: plus.ref } : plus ? { plusValues: plus.values } : {}),
+      ...(minus?.ref ? { minus: minus.ref } : minus ? { minusValues: minus.values } : {}),
+    };
+  }
+  return Object.keys(out).length ? out : null;
+}
 const richText = node => descendants(node, 't').map(text).join('');
 
 // A group's children have their own coordinate system. A chart found somewhere
@@ -789,6 +821,7 @@ export async function readXlsxCharts(book, sheets = [], inventory = new Map(), {
       // Each series' trendline, of whichever kind; a series has at most one here (Excel allows several).
       trendline: series.some(s => child(s, 'trendline')),
       ...(series.some(s => child(s, 'trendline')) ? { trendlines: series.map(s => trendlineOf(s, fill)) } : {}),
+      ...(['scatter', 'bubble'].includes(type) && series.some(s => child(s, 'errBars')) ? { errorBars: series.map(s => errorBarsOf(s, fill)) } : {}),
       labels: bubbleOnly ? series.some(s => { const l = bubbleLabels(s); return l.value || l.size || l.category || l.series; })
         : series.some(s => (chartBoolean(child(s, 'dLbls'), 'showVal').showVal ?? chartBoolean(child(groups.find(g => g.children.includes(s)), 'dLbls'), 'showVal').showVal) === true
           || children(child(s, 'dLbls'), 'dLbl').some(p => chartBoolean(p, 'showVal').showVal === true)),
@@ -891,8 +924,6 @@ export async function readXlsxCharts(book, sheets = [], inventory = new Map(), {
           series: series.map(s => {
             return { gradient: gradient(child(s, 'spPr')), stroke: fill(path(s, 'spPr', 'ln')), strokeWidth: Number(path(s, 'spPr', 'ln')?.attrs.w || 9525) / 9525,
               labels: bubbleLabels(s),
-              errors: children(s, 'errBars').map(e => ({ axis: val(e, 'errDir'), type: val(e, 'errValType'), direction: val(e, 'errBarType'), value: number(e, 'val') ?? 1,
-                caps: !['1', 'true'].includes(val(e, 'noEndCap')), color: fill(path(e, 'spPr', 'ln')), width: Number(path(e, 'spPr', 'ln')?.attrs.w || 9525) / 9525 })),
             };
           }),
         } } : {}),

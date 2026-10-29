@@ -19,7 +19,8 @@ it('preserves independent literal X/Y/size vectors, appearance and sheet geometr
         annotations: [{ text: 'Standard error & uncertainty', box: { x: .2, y: .12 }, style: { font: 'lato-light', size: 14 } }],
         bubble: { scale: 100, sizeRepresents: 'area' } } });
     expect(chart.appearance.bubble.series).toHaveLength(3);
-    expect(chart.appearance.bubble.series[0]).toMatchObject({ labels: { value: true, size: false }, errors: [{ axis: 'x', type: 'stdErr' }, { axis: 'y', type: 'stdErr' }] });
+    expect(chart.appearance.bubble.series[0]).toMatchObject({ labels: { value: true, size: false } });
+    expect(chart.errorBars[0]).toMatchObject({ x: { type: 'stdErr' }, y: { type: 'stdErr' } });
     const data = chartData(wb, sheet.id, chart);
     expect(data.series.map(s => [s.x, s.values, s.sizes])).toEqual([
       [[2, 4, null], [6, 8, null], [9, 36, null]],

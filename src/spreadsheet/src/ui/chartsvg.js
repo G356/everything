@@ -12,6 +12,7 @@ import { maxOf, minOf } from '../core/numeric.js';
 import { wrapLines } from '../core/textfit.js';
 import { SPECIAL_CHART_TYPES, renderSpecialChart, renderWaterfall } from './chartsvg-special.js';
 import { fitTrend, trendEquation, trendEquationText, trendFor, trendName, trendPoints, trendRSquaredText } from '../core/trendline.js';
+import { ERROR_BAR_COLOR, errorBarExtents, errorBarsFor, errorBarsSvg } from '../core/error-bars.js';
 
 // The light theme's --series-* tokens in tokens.css, in order: every fill reads at 3:1 on white.
 export const SERIES_COLORS = ['#337bfc', '#eb6834', '#0f8f61', '#b57a00', '#c4417a', '#4a3aa7', '#0e7490', '#8a5a00', '#918f88'];
@@ -596,6 +597,11 @@ function renderChartContent(data, chart, width, height) {
     series = series.map((s, si) => (stackIdx.includes(si) ? { ...s, raw: s.values, values: s.values.map((v, i) => (v == null ? null : totals[i] ? (v / totals[i]) * 100 : 0)) } : s));
   }
   let n = categories.length;
+  // A scatter or bubble chart's error bars: where each runs, so its axes take them in.
+  const xyChart = chart.type === 'scatter' || chart.type === 'bubble';
+  const xyValues = xyChart ? (data.x || categories.map((_, i) => i + 1)) : null;
+  const errorExtents = xyChart ? series.map((s, j) => seriesErrorExtents(chart, data, j,
+    s.values.map((y, i) => ({ i, x: xyValues[i], y })).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y)))) : [];
   let lo = Infinity;
   let hi = -Infinity;
   const acc = (v) => { if (Number.isFinite(v) && ((isHistogram || wf) || ((chart.yMin == null || v >= chart.yMin) && (chart.yMax == null || v <= chart.yMax)))) { lo = Math.min(lo, v); hi = Math.max(hi, v); } };
@@ -612,6 +618,7 @@ function renderChartContent(data, chart, width, height) {
   } else {
     for (const [si, s] of series.entries()) if (!(secondary && lineIdx.includes(si))) s.values.forEach(acc);
   }
+  for (const e of errorExtents.flatMap(b => b.y)) { acc(e.low); acc(e.high); }
   // A combo chart's line may read against its own axis on the right, so a small series beside big bars stays legible.
   let lo2 = Infinity;
   let hi2 = -Infinity;
@@ -658,7 +665,8 @@ function renderChartContent(data, chart, width, height) {
   const xStyle = isScatter ? data.xStyle || null : null; // the x column's own format: dates read as dates
   let xScale = null;
   if (isScatter) {
-    const finite = xs.filter((v) => v != null && (xBounds.min == null || v >= xBounds.min) && (xBounds.max == null || v <= xBounds.max));
+    const finite = [...xs, ...errorExtents.flatMap(b => b.x.flatMap(e => [e.low, e.high]))]
+      .filter((v) => v != null && (xBounds.min == null || v >= xBounds.min) && (xBounds.max == null || v <= xBounds.max));
     xScale = chartAxisScale(minOf(finite), maxOf(finite), { min: xBounds.min, max: xBounds.max, ticks: 6, numeric: true });
     if (dateKindOf(xStyle) === 'date' && xScale.step < 1) {
       xScale.step = 1;
@@ -789,6 +797,10 @@ function renderChartContent(data, chart, width, height) {
         const label = sizes ? (size != null ? data.sizePointStyles?.[i] ? formatValue(size, data.sizePointStyles[i]) : pointValueText(size, data.sizeStyle || null) : null) : valueText(v, s, i);
         if (chart.labels && label != null) parts.push(`<text x="${f(sx(x))}" y="${f(vy(v) - r - 3)}" text-anchor="middle" font-size="10" fill="var(--ink-2)">${esc(label)}</text>`);
       });
+    });
+    series.forEach((s, si) => {
+      const bars = errorBarsFor(chart, si);
+      if (bars) parts.push(errorBarsSvg(errorExtents[si], bars, { j: si, sx, sy: vy, color: 'var(--ink-2)', every, fmt: f, dashes: CHART_LINE_DASHES }));
     });
     if (chart.trendline) series.forEach((s, si) => trend(s.values.map((v, i) => [xs[i], v]), sx, si));
     parts.push('</g>', trendLabelText(), ...categoryLabels);
@@ -995,19 +1007,10 @@ function bubblePoints(series, options) {
   });
 }
 
-function bubbleErrorBars(points, errors) {
-  return errors.flatMap(error => {
-    const values = points.map(p => p[error.axis]);
-    let mean = 0, sumSquares = 0, count = 0;
-    for (const v of values) { const delta = v - mean; mean += delta / ++count; sumSquares += delta * (v - mean); }
-    const deviation = count > 1 ? Math.sqrt(Math.max(0, sumSquares / (count - 1))) : 0;
-    const common = error.type === 'stdErr' ? deviation / Math.sqrt(count || 1) : error.type === 'stdDev' ? deviation * error.value : error.value;
-    return points.flatMap(p => {
-      const v = p[error.axis], amount = error.type === 'percentage' ? Math.abs(v) * error.value / 100 : common;
-      if (!Number.isFinite(amount)) return [];
-      return [{ ...error, i: p.i, x: p.x, y: p.y, low: v - (error.direction === 'plus' ? 0 : amount), high: v + (error.direction === 'minus' ? 0 : amount) }];
-    });
-  });
+/** Series `j`'s error bars over its plotted points ([{ i, x, y }]): { x, y }, each a list of extents. */
+function seriesErrorExtents(chart, data, j, points) {
+  const bars = errorBarsFor(chart, j), custom = data.errorValues?.[j];
+  return { x: errorBarExtents(points, bars?.x, 'x', custom?.x), y: errorBarExtents(points, bars?.y, 'y', custom?.y) };
 }
 
 /** The chart area: its fill, and its outline when the chart names one (a light grey border). */
@@ -1112,7 +1115,9 @@ function renderStyledCartesian(data, chart, width, height) {
   const valueLabels = !a.hideYAxis && a.yLabelPosition !== 'none';
   const numericX = chart.type === 'scatter' || !!bubble;
   const bubbles = bubble ? series.map(s => bubblePoints(s, bubble)) : [];
-  const errors = bubble ? bubbles.map((points, i) => bubbleErrorBars(points, bubble.series[i]?.errors || [])) : [];
+  // Error bars, on the bubbles or on a scatter chart's points, widen the axes they run along.
+  const errors = numericX ? series.map((s, j) => seriesErrorExtents(chart, data, j, bubble ? bubbles[j]
+    : s.values.map((y, i) => ({ i, x: (s.x || data.x)?.[i], y })).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y)))) : [];
   const columnIndices = layered ? series.flatMap((_, i) => a.seriesTypes[i] === 'column' ? [i] : []) : null;
   const columnCount = layered ? columnIndices.length : chart.type === 'column' || horizontal ? series.length : chart.type === 'combo' ? Math.max(0, series.length - 1) : 0;
   const secondary = !layered && chart.type === 'combo' && chart.secondaryAxis && series.length > 1;
@@ -1156,7 +1161,7 @@ function renderStyledCartesian(data, chart, width, height) {
   const values = [...(stacked ? stacks.flatMap(points => points.filter(Boolean).map(p => p.to)) : []),
     ...series.flatMap((s, i) => (stacked && i < columnCount) || (secondary && i === series.length - 1) ? []
       : areaStacks[i] ? areaStacks[i].filter(Boolean).map(p => p.to) : bubble ? bubbles[i].map(p => p.y) : s.values.filter(Number.isFinite)),
-    ...errors.flat().filter(e => e.axis === 'y').flatMap(e => [e.low, e.high])];
+    ...errors.flatMap(b => b.y.flatMap(e => [e.low, e.high]))];
   const percentAxis = percent || (pureArea || stackedLine) && chart.stack100 || layered && series.every((_, i) => areaStacks[i] && a.seriesGroups[i]?.grouping === 'percentStacked');
   const axisScale = (values, options) => {
     // Out-of-range label helpers must not determine an automatic bound.
@@ -1264,8 +1269,8 @@ function renderStyledCartesian(data, chart, width, height) {
   const categoryY = (i, s) => dates ? datePosition((s?.x || data.x)?.[i])
     : plot.y + plot.h * (a.reverseCategories ? categoryFraction(i) : 1 - categoryFraction(i));
   const sy2 = v => bottom - valueFraction(v, scale2, a.reverseSecondaryValues) * plot.h;
-  const dateValues = bubble ? [...bubbles.flat().map(p => p.x), ...errors.flat().filter(e => e.axis === 'x').flatMap(e => [e.low, e.high])]
-    : series.flatMap(s => s.x || data.x || []);
+  const errorXs = errors.flatMap(b => b.x.flatMap(e => [e.low, e.high]));
+  const dateValues = bubble ? [...bubbles.flat().map(p => p.x), ...errorXs] : [...series.flatMap(s => s.x || data.x || []), ...errorXs];
   const dates = a.dateAxis && !numericX ? chartDateAxis(dateValues, {
     min: a.xMin, max: a.xMax, baseUnit: a.xBaseTimeUnit, between: a.categoryBetween !== false,
   }) : null;
@@ -1727,14 +1732,8 @@ function renderStyledCartesian(data, chart, width, height) {
           if (values.length && x >= xMin && x <= xMax && y >= scale.min && y <= scale.max) bubbleLabels.push({ value: values.join(', '), x: sx(x), y: sy(y), r, labels, ...(st?.labels ? {} : { ink: inkOn(color) }) });
         }
       });
-      for (const e of errors[j]) {
-        if (e.i % every) continue;
-        const x1 = sx(e.axis === 'x' ? e.low : e.x), x2 = sx(e.axis === 'x' ? e.high : e.x);
-        const y1 = sy(e.axis === 'y' ? e.low : e.y), y2 = sy(e.axis === 'y' ? e.high : e.y);
-        const caps = !e.caps ? '' : e.axis === 'x' ? ` M ${f(x1)} ${f(y1 - 3)} V ${f(y1 + 3)} M ${f(x2)} ${f(y2 - 3)} V ${f(y2 + 3)}`
-          : ` M ${f(x1 - 3)} ${f(y1)} H ${f(x1 + 3)} M ${f(x2 - 3)} ${f(y2)} H ${f(x2 + 3)}`;
-        parts.push(`<path class="chart-error-bar" data-axis="${e.axis}" d="M ${f(x1)} ${f(y1)} L ${f(x2)} ${f(y2)}${caps}" fill="none" stroke="${e.color}" stroke-width="${e.width}"/>`);
-      }
+      const bars = errorBarsFor(chart, j);
+      if (bars) parts.push(errorBarsSvg(errors[j], bars, { j, sx, sy, color: ERROR_BAR_COLOR, every, fmt: f, dashes: CHART_LINE_DASHES }));
       if (chart.trendline) trendline(s, j, color, sy);
       return;
     }
@@ -1861,6 +1860,8 @@ function renderStyledCartesian(data, chart, width, height) {
       }
     }
     if (chart.trendline) trendline(s, j, color, valueY);
+    const bars = numericX && errorBarsFor(chart, j);
+    if (bars) parts.push(errorBarsSvg(errors[j], bars, { j, sx, sy: valueY, color: ERROR_BAR_COLOR, every: Math.max(1, Math.ceil(n * series.length / MARK_BUDGET)), fmt: f, dashes: CHART_LINE_DASHES }));
   });
   parts.push('</g>');
   // Interior tick labels remain readable over bars, areas and other marks.

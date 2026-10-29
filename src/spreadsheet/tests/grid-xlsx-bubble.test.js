@@ -68,10 +68,11 @@ it('renders bubbles at independent coordinates with area scaling, gradients and 
 it.each([
   ['fixedVal', 2, 'plus', [2, 4]],
   ['percentage', 50, 'minus', [1, 2]],
-  ['stdDev', 1, 'both', [2 - Math.SQRT2, 2 + Math.SQRT2]],
+  // Standard deviation bars stand on the series' mean (x = 3 here), as Excel draws them, not on each point.
+  ['stdDev', 1, 'both', [3 - Math.SQRT2, 3 + Math.SQRT2]],
 ])('renders %s errors with the requested direction and caps', async (type, value, direction, [low, high]) => {
   const { chart, render } = await load();
-  chart.appearance.bubble.series[0].errors = [{ axis: 'x', type, value, direction, caps: false, color: '#000000', width: 1 }];
+  chart.errorBars = [{ x: { type, value, direction, caps: false, color: '#000000', width: 1 } }];
   const host = render(), { x, y } = coordinates(host, chart);
   expectPath(host.querySelector('.chart-error-bar').getAttribute('d'), `M ${x(low)} ${y(6)} L ${x(high)} ${y(6)}`);
 });

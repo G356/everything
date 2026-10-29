@@ -52,10 +52,10 @@ it('keeps references live after native reopening and omitted-sheet copy', async 
 });
 it.each(['stdErr', 'stdDev', 'percentage', 'fixedVal'])('exports %s error bars, direction, caps and styles', async type => {
   const wb = await workbookFromFile(bubbleXlsx());
-  const st = wb.sheets[0].charts[0].appearance.bubble.series[0];
-  st.errors = [{ axis: 'x', type, direction: 'minus', value: 2.5, caps: false, color: '#123456', width: 2 }];
+  const bar = { type, direction: 'minus', value: 2.5, caps: false, color: '#123456', width: 2 };
+  wb.sheets[0].charts[0].errorBars = [{ x: bar }];
   const result = await native(wb);
-  expect(result.wb.sheets[0].charts[0].appearance.bubble.series[0].errors[0]).toEqual({ ...st.errors[0], value: type === 'stdErr' ? 1 : 2.5 });
+  expect(result.wb.sheets[0].charts[0].errorBars[0]).toEqual({ x: { ...bar, value: type === 'stdErr' ? 1 : 2.5 } });
 });
 it('preserves scaling, negative bubbles, size mode, hidden labels and label fields', async () => {
   const wb = await workbookFromFile(bubbleXlsx());
