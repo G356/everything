@@ -234,9 +234,18 @@ const resolution = (dpi: number): PhotoDocument['resolution'] => ({
 
 export type OpenOptions = DecodeOptions & { source?: RecentSource };
 
+/** Copy a file picked from disk into memory. Chromium reads slices of a
+ * disk-backed File lazily from disk, so they fail with NotReadableError once
+ * the file changes there; the document's assets are slices of what was opened. */
+export async function inMemoryFile(blob: Blob): Promise<Blob> {
+  if (!(blob instanceof File)) return blob;
+  return new File([await blob.arrayBuffer()], blob.name, { type: blob.type, lastModified: blob.lastModified });
+}
+
 /** Open a file as a new document tab, or place it into the current document. */
 export async function openFile(e: Editor, blob: Blob, name: string, place = false, opts: OpenOptions = {}) {
   e.transform.apply();
+  blob = await inMemoryFile(blob);
   const lower = name.toLowerCase();
   const isPsd = /\.ps[db]$/.test(lower);
   const source: RecentSource = opts.source ?? { kind: 'local', blob };
