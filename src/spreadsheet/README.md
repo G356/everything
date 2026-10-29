@@ -141,7 +141,7 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   beside the plot, fixed axis bounds, custom tick values on a value axis
   (listed like pages to print, such as 1, 2, 5-8, on linear and logarithmic
   axes; Excel has no such setting, so .xlsx files keep its automatic ticks),
-  gridlines that can be turned off,
+  horizontal and vertical gridlines, each turned on or off,
   smooth curves for line and area charts, and axis and value labels in the
   data's currency, percent, or date format (large values read as K, M, B,
   and T), floating over the sheet; a chart's menu duplicates it, copies it to the clipboard as a picture, or downloads it as PNG or SVG. Drag to

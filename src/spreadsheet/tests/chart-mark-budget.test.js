@@ -134,7 +134,7 @@ describe('the chart dialog preview', () => {
     expect(preview()).toContain('>Quarterly<');
     expect(spy.mock.calls.length).toBe(opened);
     // Options that only change the drawing reuse the data; what the data depends on reads it again.
-    [...document.querySelectorAll('label.check')].find((node) => node.textContent === 'Gridlines').querySelector('input').click();
+    [...document.querySelectorAll('label.check')].find((node) => node.textContent === 'Horizontal gridlines').querySelector('input').click();
     expect(spy.mock.calls.length).toBe(opened);
     const seriesIn = document.querySelector('[aria-label="Series in"]');
     seriesIn.value = 'rows';

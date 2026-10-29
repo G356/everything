@@ -8,7 +8,7 @@ import { el, fieldId, isComposing } from './dom.js';
 import { icon } from './icons.js';
 import { openModal } from './modal.js';
 import { renderChartSvg, seriesColor } from './chartsvg.js';
-import { CHART_DASH_CHOICES, CHART_DESCRIPTION_MAX_LENGTH, CHART_TYPES, chartErrorValues, chartData, chartTitles, chartXBounds, chartXBoundsPatch, defaultChart, normalizeChart } from '../core/charts.js';
+import { CHART_DASH_CHOICES, CHART_DESCRIPTION_MAX_LENGTH, CHART_TYPES, chartErrorValues, chartData, chartTitles, chartXBounds, chartXBoundsPatch, chartXGridlines, defaultChart, normalizeChart } from '../core/charts.js';
 import { parseRange, rangeName } from '../core/cell.js';
 import { changeSubtypePatch } from '../core/chart-subtypes.js';
 import { chartElementPatch, trendlineAllowed } from '../core/chart-design.js';
@@ -97,7 +97,8 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     yMinInput.setAttribute('aria-label', `${valueAxis} minimum`); yMaxInput.setAttribute('aria-label', `${valueAxis} maximum`);
     binsField.hidden = draft.type !== 'histogram';
     labelsField.hidden = pieLike;
-    gridField.hidden = pieLike || radar;
+    hGridField.hidden = pieLike || radar;
+    vGridField.hidden = pieLike || radar || draft.type === 'surface';
     smoothField.hidden = !['line', 'area', 'combo'].includes(draft.type);
     // Points along x values, a hierarchy's levels and a histogram's bins have no category labels to pick.
     categoriesField.hidden = xyChart() || ['treemap', 'sunburst', 'histogram'].includes(draft.type);
@@ -159,10 +160,14 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     el('option', { value: 'none' }, 'No legend'));
   legendSel.value = draft.legend === false ? 'none' : (draft.legendPos || 'bottom');
   const labelsBox = el('input', { type: 'checkbox', checked: !!draft.labels });
-  const gridBox = el('input', { type: 'checkbox', checked: draft.gridlines !== false });
+  // Gridlines by the way they run: on a bar chart the value gridlines are the vertical ones.
+  const barChart = () => draft.type === 'bar';
+  const hGridBox = el('input', { type: 'checkbox', checked: barChart() ? chartXGridlines(draft) : draft.gridlines !== false });
+  const vGridBox = el('input', { type: 'checkbox', checked: barChart() ? draft.gridlines !== false : chartXGridlines(draft) });
   const smoothBox = el('input', { type: 'checkbox', checked: !!draft.smooth });
   const hiddenBox = el('input', { type: 'checkbox', checked: !!draft.includeHidden });
-  const gridField = el('label.check', {}, gridBox, el('span', {}, draft.appearance?.xGridlines || draft.appearance?.y2Gridlines ? 'Primary value gridlines' : 'Gridlines'));
+  const hGridField = el('label.check', {}, hGridBox, el('span', {}, 'Horizontal gridlines'));
+  const vGridField = el('label.check', {}, vGridBox, el('span', {}, 'Vertical gridlines'));
   const smoothField = el('label.check', {}, smoothBox, el('span', {}, 'Smooth lines'));
   const hiddenField = el('label.check', {}, hiddenBox, el('span', {}, 'Include hidden cells'));
   const numberInput = (value, label) => el('input.input', { type: 'number', step: 'any', value: value ?? '', 'aria-label': label, placeholder: 'Auto' });
@@ -363,7 +368,9 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
     draft.legend = legendSel.value !== 'none';
     if (legendSel.value !== 'none') draft.legendPos = legendSel.value;
     draft.labels = labelsBox.checked;
-    draft.gridlines = gridBox.checked;
+    draft.gridlines = (barChart() ? vGridBox : hGridBox).checked;
+    const xGrid = (barChart() ? hGridBox : vGridBox).checked;
+    if (xGrid !== chartXGridlines(draft)) Object.assign(draft, chartElementPatch(draft, 'gridlines', { axis: barChart() ? 'horizontal' : 'vertical', on: xGrid }));
     draft.smooth = smoothBox.checked;
     draft.includeHidden = hiddenBox.checked;
     const yMin = yMinInput.value.trim() === '' ? null : Number(yMinInput.value);
@@ -439,10 +446,10 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
   let redraw = 0;
   const refreshSoon = () => { clearTimeout(redraw); redraw = setTimeout(refresh, 150); };
   for (const input of sourceInputs.flatMap(s => [s.categories, s.values, ...(s.sizes ? [s.sizes] : [])])) input.addEventListener('input', refreshSoon);
-  for (const input of [rangeInput, seriesSel, headersSel, categoriesSel, stackedBox, stack100Box, trendSel, orderSel, periodInput, eqBox, r2Box, trendDashSel, trendWidthInput, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput]) input.addEventListener('input', refresh);
+  for (const input of [rangeInput, seriesSel, headersSel, categoriesSel, stackedBox, stack100Box, trendSel, orderSel, periodInput, eqBox, r2Box, trendDashSel, trendWidthInput, axis2Box, legendSel, labelsBox, hGridBox, vGridBox, smoothBox, hiddenBox, yMinInput, yMaxInput, xMinInput, xMaxInput, binsInput]) input.addEventListener('input', refresh);
   for (const input of [titleInput, descriptionInput, xTitleInput, yTitleInput, y2TitleInput]) input.addEventListener('input', refreshSoon);
   for (const s of errorAxes) { s.kind.addEventListener('change', refresh); s.amount.addEventListener('input', refresh); s.cells.addEventListener('input', refreshSoon); s.cells.addEventListener('change', refresh); }
-  for (const input of [seriesSel, headersSel, categoriesSel, stackedBox, stack100Box, trendSel, orderSel, eqBox, r2Box, axis2Box, legendSel, labelsBox, gridBox, smoothBox, hiddenBox]) input.addEventListener('change', refresh);
+  for (const input of [seriesSel, headersSel, categoriesSel, stackedBox, stack100Box, trendSel, orderSel, eqBox, r2Box, axis2Box, legendSel, labelsBox, hGridBox, vGridBox, smoothBox, hiddenBox]) input.addEventListener('change', refresh);
 
   const submit = (e) => {
     e?.preventDefault();
@@ -454,11 +461,12 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
       const labelPatch = labelsPatch(readData());
       wb.updateChart(sheetId, chart.id, {
         type: draft.type, range: draft.range, title: draft.title, description: draft.description, seriesIn: draft.seriesIn, headers: draft.headers, categoryLabels: draft.categoryLabels, stacked: draft.stacked, stack100: draft.stack100, ...trend,
-        legend: draft.legend, legendPos: draft.legendPos, labels: draft.labels, gridlines: draft.gridlines, smooth: draft.smooth, xTitle: draft.xTitle, yTitle: draft.yTitle, y2Title: draft.y2Title,
+        legend: draft.legend, legendPos: draft.legendPos, labels: draft.labels, gridlines: draft.gridlines, xGridlines: draft.xGridlines, smooth: draft.smooth, xTitle: draft.xTitle, yTitle: draft.yTitle, y2Title: draft.y2Title,
         colors: draft.colors, yMin: draft.yMin, yMax: draft.yMax, bins: draft.bins, secondaryAxis: draft.secondaryAxis, includeHidden: draft.includeHidden,
         ...(draft.sourceRefs ? { sourceRefs: draft.sourceRefs } : {}),
         titleRef: draft.titleRef, xTitleRef: draft.xTitleRef, yTitleRef: draft.yTitleRef, y2TitleRef: draft.y2TitleRef,
         ...(restyled ? Object.fromEntries(SUBTYPE_KEYS.map(k => [k, draft[k]])) : {}),
+        ...(draft.appearance && draft.appearance !== chart.appearance ? { appearance: draft.appearance } : {}),
         ...(labelPatch?.appearance ? { appearance: labelPatch.appearance } : {}),
         ...(xyChart() ? chartXBoundsPatch({ appearance: labelPatch?.appearance || draft.appearance }, xBounds.min, xBounds.max) : {}),
       });
@@ -511,7 +519,7 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
         binsField,
         el('div.row.row-2', {},
           el('label.field', {}, el('span.field-label', {}, 'Legend'), legendSel),
-          el('div.field', {}, el('span.field-label', {}, 'Options'), el('div.check-group', {}, labelsField, gridField, smoothField, hiddenField))),
+          el('div.field', {}, el('span.field-label', {}, 'Options'), el('div.check-group', {}, labelsField, hGridField, vGridField, smoothField, hiddenField))),
         el('div.row', {}, stackedField),
         trendRow,
         errorRow,

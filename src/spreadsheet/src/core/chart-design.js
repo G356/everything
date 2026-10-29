@@ -5,7 +5,7 @@
  * cannot take the change.
  */
 import { colName } from './cell.js';
-import { chartData, chartXBounds } from './charts.js';
+import { chartData, chartXBounds, chartXGridlines } from './charts.js';
 import { quoteSheet } from './refs.js';
 import { CHART_LINE_GREY, CHART_TEXT_GREY, excelChartAppearance, subtypeOf } from './chart-subtypes.js';
 import { DEFAULT_TREND, TREND_TYPES, normalizeTrend, trendFor } from './trendline.js';
@@ -57,7 +57,7 @@ export function chartElementState(chart) {
       ? (a.pie?.labels && (a.pie.labels.value || a.pie.labels.percent || a.pie.labels.category) ? a.pie.labels.position || 'bestFit' : 'none')
       : chart.labels ? valueLabels?.position || 'show' : 'none',
     dataTable: a.dataTable ? (a.dataTable.keys ? 'keys' : 'noKeys') : 'none',
-    gridlines: { horizontal: horizontal ? !!a.xGridlines : chart.gridlines !== false, vertical: horizontal ? chart.gridlines !== false : !!a.xGridlines },
+    gridlines: { horizontal: horizontal ? chartXGridlines(chart) : chart.gridlines !== false, vertical: horizontal ? chart.gridlines !== false : chartXGridlines(chart) },
     legend: chart.legend === false ? 'none' : chart.legendPos || 'bottom',
     // The kind every series' trendline shares, or 'mixed'.
     trendline: !chart.trendline ? 'none' : (types => (types.size === 1 ? [...types][0] : 'mixed'))(
@@ -132,7 +132,8 @@ export function chartElementPatch(chart, element, value, { seriesCount = 1 } = {
       // Value gridlines run across the value axis: horizontal ones on a column chart, vertical ones on a bar chart.
       const valueGrid = (value.axis === 'horizontal') !== horizontal;
       if (valueGrid) return done({ gridlines: !!value.on });
-      if (!styled || chart.type === 'surface') return null;
+      if (chart.type === 'surface') return null;
+      if (!styled) return { xGridlines: !!value.on };
       return done({ appearance: { xGridlines: !!value.on, gridlineStyles: { ...(a.gridlineStyles || {}), ...(value.on && !a.gridlineStyles?.x ? { x: { color: CHART_LINE_GREY, width: 1 } } : {}) } } });
     }
     case 'legend':

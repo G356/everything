@@ -6,7 +6,7 @@ import { chartDateAxis } from '../core/chart-date-axis.js';
  * preview). Colors are CSS variables so charts follow the theme.
  */
 
-import { authoredBarGapWidth, chartXBounds, chartPointStyle, niceScale, axisLabel, histogramBins, waterfallSteps, dateKindOf, CHART_LINE_DASHES } from '../core/charts.js';
+import { authoredBarGapWidth, chartXBounds, chartXGridlines, chartPointStyle, niceScale, axisLabel, histogramBins, waterfallSteps, dateKindOf, CHART_LINE_DASHES } from '../core/charts.js';
 import { formatValue, formatGeneral, fontStack, numFmtToStyle } from '../core/format.js';
 import { maxOf, minOf } from '../core/numeric.js';
 import { wrapLines } from '../core/textfit.js';
@@ -773,6 +773,7 @@ function renderChartContent(data, chart, width, height) {
   if (isScatter) {
     const sx = (v) => plot.x + axisFraction(v, xScale.min, xScale.max) * plot.w;
     for (const v of scaleTicks(xScale)) {
+      if (chartXGridlines(chart)) parts.push(`<line x1="${f(sx(v))}" y1="${f(plot.y)}" x2="${f(sx(v))}" y2="${f(plot.y + plot.h)}" stroke="var(--grid)" stroke-width="1" class="chart-gridline-x"/>`);
       categoryLabels.push(`<text x="${f(sx(v))}" y="${f(categoryLabelY + 15)}" text-anchor="middle" font-size="11" fill="var(--ink-3)">${esc(axisLabel(v, xStyle, xScale.step))}</text>`);
     }
     openMarks();
@@ -868,8 +869,8 @@ function renderChartContent(data, chart, width, height) {
     else categoryLabels.push(`<text x="${f(catPos(i) + slot / 2)}" y="${f(categoryLabelY + 15)}" text-anchor="middle" font-size="11" fill="var(--ink-2)">${label}</text>`);
   });
   // Category gridlines (Add Chart Element ▸ Gridlines), between the categories, behind the marks.
-  if (chart.appearance?.xGridlines) {
-    const ink = chart.appearance.gridlineStyles?.x?.color;
+  if (!isScatter && chartXGridlines(chart)) {
+    const ink = chart.appearance?.gridlineStyles?.x?.color;
     for (let i = 0; i <= n; i++) {
       const at = catPos(i);
       parts.push(horizontal ? `<line x1="${f(plot.x)}" y1="${f(at)}" x2="${f(plot.x + plot.w)}" y2="${f(at)}" stroke="${esc(ink && ink !== 'none' ? ink : 'var(--grid)')}" stroke-width="1" class="chart-gridline-x"/>`

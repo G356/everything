@@ -4,7 +4,7 @@
  * chartsvg.js: data in, markup out. A chart in the default style draws in its appearance's fonts,
  * colours and layout; an older app chart in the theme's own colours.
  */
-import { axisLabel, niceScale, chartPointStyle, waterfallSteps } from '../core/charts.js';
+import { axisLabel, niceScale, chartPointStyle, chartXGridlines, waterfallSteps } from '../core/charts.js';
 import { axisFraction, chartAxisScale } from '../core/chart-axis-scale.js';
 import { formatValue, fontStack } from '../core/format.js';
 import { maxOf, minOf } from '../core/numeric.js';
@@ -97,7 +97,7 @@ function chartFrame(chart, width, height, entries, describe) {
     out.push('</g>');
     return out.join('');
   };
-  return { W, H, a, st, parts, plot, drawLegend };
+  return { W, H, a, st, parts, plot, drawLegend, xGrid: chartXGridlines(chart) };
 }
 
 function message(chart, width, height, note) {
@@ -253,8 +253,8 @@ function valueAxis(fr, chart, scale, style, { side = 'left', grid = true, format
 /** Vertical gridlines between `n` category slots across `plot` (Add Chart Element ▸ Gridlines ▸ Vertical), behind the marks. */
 function categoryGridlines(fr, n, plot) {
   const { a } = fr;
-  if (!a?.xGridlines || !n) return '';
-  const style = a.gridlineStyles?.x, color = style?.color && style.color !== 'none' ? style.color : '#d9d9d9', out = [];
+  if (!fr.xGrid || !n) return '';
+  const style = a?.gridlineStyles?.x, color = style?.color && style.color !== 'none' ? style.color : a ? '#d9d9d9' : 'var(--grid)', out = [];
   for (let i = 0; i <= n; i++) {
     const x = plot.x + plot.w * i / n;
     out.push(`<line class="chart-gridline chart-gridline-x" x1="${f(x)}" y1="${f(plot.y)}" x2="${f(x)}" y2="${f(plot.y + plot.h)}" stroke="${esc(color)}" stroke-width="${style?.width ?? 1}"/>`);

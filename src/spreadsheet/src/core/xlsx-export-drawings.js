@@ -391,7 +391,7 @@ function chartXml(X, wb, sheet, ch) {
     const position = horizontal ? (ch.type === 'bar' ? 'l' : 'b') : secondary ? 'r' : ap.yPosition || (ch.type === 'bar' ? 'b' : 'l');
     body += val('delete', Number(!!(horizontal ? ap.hideXAxis : secondary ? ap.hideY2Axis : ap.hideYAxis))) + val('axPos', position);
     const gridKey = horizontal ? 'x' : secondary ? 'y2' : 'y';
-    body += gridlines(horizontal ? ap.xGridlines ?? ap.bubble?.xGrid : secondary ? ap.y2Gridlines : ch.gridlines,
+    body += gridlines(horizontal ? ap.xGridlines ?? ap.bubble?.xGrid ?? ch.xGridlines : secondary ? ap.y2Gridlines : ch.gridlines,
       ap.gridlineStyles?.[gridKey] || (ap.bubble && !secondary ? { color: horizontal ? ap.bubble.xGridColor : ap.bubble.yGridColor } : !horizontal && !secondary ? { color: '#d9d9d9' } : null));
     const titleKey = horizontal ? 'xTitle' : secondary ? 'y2Title' : 'yTitle', label = data.titles?.[titleKey] ?? ch[titleKey];
     // Linked and literal titles use the same physical axis orientation. An

@@ -57,14 +57,15 @@ it('shows live linked titles, preserves links for unrelated edits, and detaches 
   expect(wb.chartById(id, chartId).titleRef).toBe('A1');
 });
 
-it('labels the primary gridline control clearly and retains independent category grids through edits and undo', () => {
+it('names the gridline controls by the way they run and retains independent category grids through edits and undo', () => {
   const wb = new Workbook(), id = wb.activeSheetId;
   [['Name', 'Value'], ['A', '2'], ['B', '4']].forEach((row, r) => row.forEach((v, c) => wb.setInput(id, r, c, v)));
   const chartId = wb.addChart(id, { type: 'line', range: { r1: 0, c1: 0, r2: 2, c2: 1 }, anchor: { r: 4, c: 0 },
     gridlines: false, appearance: { xGridlines: true, gridlineStyles: { y: { color: 'none', width: 1 } } } });
   openChartDialog({ wb, sheetId: () => id, range: () => wb.chartById(id, chartId).range, grid: { focus: vi.fn(), selectChart: vi.fn() } },
     { chart: wb.chartById(id, chartId) });
-  const box = [...document.querySelectorAll('label.check')].find(n => n.textContent === 'Primary value gridlines').querySelector('input');
+  const box = [...document.querySelectorAll('label.check')].find(n => n.textContent === 'Horizontal gridlines').querySelector('input');
+  expect([...document.querySelectorAll('label.check')].find(n => n.textContent === 'Vertical gridlines').querySelector('input').checked).toBe(true);
   expect(document.querySelectorAll('.chart-preview .chart-gridline-x').length).toBeGreaterThan(0);
   expect(document.querySelector('.chart-preview .chart-gridline-y')).toBeNull();
   box.click();
@@ -168,4 +169,42 @@ it('edits alternative text independently of a linked visible title with live pre
   open(); document.querySelector('[aria-label="Alternative text"]').value = ''; document.querySelector('form').requestSubmit();
   expect(wb.chartById(id, chartId).description).toBe('');
   wb.undo(); expect(wb.chartById(id, chartId).description).toBe(input.value);
+});
+
+// Edit chart's one Gridlines box turned on only the value axis's lines, while Format Axis set each axis's own.
+it.each([
+  ['line', false, 'Vertical gridlines', 'Horizontal gridlines'],
+  ['column', true, 'Vertical gridlines', 'Horizontal gridlines'],
+  ['bar', false, 'Horizontal gridlines', 'Vertical gridlines'],
+])('turns on the category gridlines of a %s chart (Excel style: %s) from the dialog', (type, styled, categoryLabel, valueLabel) => {
+  const wb = new Workbook(), id = wb.activeSheetId;
+  [['Name', 'Value'], ['A', '2'], ['B', '4']].forEach((row, r) => row.forEach((v, c) => wb.setInput(id, r, c, v)));
+  const chartId = wb.addChart(id, { type, range: { r1: 0, c1: 0, r2: 2, c2: 1 }, anchor: { r: 4, c: 0 }, ...(styled ? { appearance: {} } : {}) });
+  openChartDialog({ wb, sheetId: () => id, range: () => wb.chartById(id, chartId).range, grid: { focus: vi.fn(), selectChart: vi.fn() } },
+    { chart: wb.chartById(id, chartId) });
+  const box = label => [...document.querySelectorAll('label.check')].find(n => n.textContent === label).querySelector('input');
+  expect(box(valueLabel).checked).toBe(true);
+  expect(box(categoryLabel).checked).toBe(false);
+  expect(document.querySelector('.chart-preview .chart-gridline-x')).toBeNull();
+  box(categoryLabel).click();
+  expect(document.querySelectorAll('.chart-preview .chart-gridline-x').length).toBeGreaterThan(0);
+  document.querySelector('form').requestSubmit();
+  const chart = wb.chartById(id, chartId);
+  expect(chart.gridlines).toBe(true);
+  expect(styled ? chart.appearance.xGridlines : chart.xGridlines).toBe(true);
+  wb.undo();
+  expect(styled ? !!wb.chartById(id, chartId).appearance.xGridlines : !!wb.chartById(id, chartId).xGridlines).toBe(false);
+});
+
+it('draws vertical gridlines along a scatter chart\'s x values in the app\'s own style', () => {
+  const wb = new Workbook(), id = wb.activeSheetId;
+  [['x', 'y'], ['1', '2'], ['2', '5'], ['4', '3']].forEach((row, r) => row.forEach((v, c) => wb.setInput(id, r, c, v)));
+  const chartId = wb.addChart(id, { type: 'scatter', range: { r1: 0, c1: 0, r2: 3, c2: 1 }, anchor: { r: 4, c: 0 } });
+  openChartDialog({ wb, sheetId: () => id, range: () => wb.chartById(id, chartId).range, grid: { focus: vi.fn(), selectChart: vi.fn() } },
+    { chart: wb.chartById(id, chartId) });
+  const vertical = [...document.querySelectorAll('label.check')].find(n => n.textContent === 'Vertical gridlines').querySelector('input');
+  vertical.click();
+  expect(document.querySelectorAll('.chart-preview .chart-gridline-x').length).toBeGreaterThan(1);
+  document.querySelector('form').requestSubmit();
+  expect(wb.chartById(id, chartId).xGridlines).toBe(true);
 });

@@ -28,6 +28,8 @@ import { normalizeAxisTickValues } from './axis-tick-values.js';
  *   colors: (string|null)[],         a hex color per series (per slice for pies); null keeps the palette color
  *   legendPos: 'bottom' | 'top' | 'right',
  *   gridlines: boolean,              value-axis gridlines (default true)
+ *   xGridlines?: boolean,            a chart in the app's own style: gridlines along the category (or scatter x) axis
+ *                                    (an Excel-style chart keeps them in its appearance; see chartXGridlines)
  *   smooth: boolean,                 curved lines (line and area)
  *   yMin, yMax: number | null,       fixed value-axis bounds; null fits the data
  *   xMin?, xMax?: number,            scatter and bubble charts in the app's own style: fixed x-axis bounds
@@ -139,6 +141,9 @@ export function chartXBounds(chart) {
   const from = chart?.appearance || chart || {};
   return { min: Number.isFinite(from.xMin) ? from.xMin : null, max: Number.isFinite(from.xMax) ? from.xMax : null };
 }
+
+/** Does the chart draw gridlines along its category (or x) axis? Kept where its style keeps them, as its x bounds are. */
+export const chartXGridlines = chart => !!(chart?.appearance || chart)?.xGridlines;
 
 /** The patch that sets a chart's x-axis bounds (null for automatic) where its style keeps them. */
 export function chartXBoundsPatch(chart, min, max) {
@@ -414,6 +419,7 @@ function normalizeChartBody(raw) {
     colors: normalizeColors(raw.colors),
     legendPos: raw.legendPos === 'top' || raw.legendPos === 'right' ? raw.legendPos : 'bottom',
     gridlines: raw.gridlines !== false,
+    ...(raw.xGridlines === true && !raw.appearance ? { xGridlines: true } : {}),
     smooth: !!raw.smooth,
     secondaryAxis: !!raw.secondaryAxis, // combo: the line reads against its own axis on the right
     ...(type === 'combo' && raw.pareto && raw.sourceRefs?.length === 1 ? { pareto: true } : {}),
