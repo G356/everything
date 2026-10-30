@@ -5,6 +5,7 @@ import { editorView } from '../src/views/editor.js';
 import { Doc } from '../src/lib/doc.js';
 import { closeAllModals } from '../src/ui/modal.js';
 import { closeMenu } from '../src/ui/menu.js';
+import { SERIES_COLORS } from '../src/ui/chartsvg.js';
 
 let view;
 beforeEach(() => {
@@ -60,6 +61,7 @@ it('shows only the controls that change a chart in the app\'s style', async () =
   expect(pane.querySelector('select[aria-label="Border"]')).toBeNull();
   const fill = pane.querySelector('select[aria-label="Fill"]');
   fill.value = 'solid'; fill.dispatchEvent(new Event('change')); await flush();
-  expect(chart().colors[0]).toBe('#4472c4');
+  // Solid fill starts from the colour the series is already drawn in.
+  expect(chart().colors[0]).toBe(SERIES_COLORS[0]);
   expect(chart().appearance).toBeUndefined();
 });

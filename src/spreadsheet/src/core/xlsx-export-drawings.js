@@ -83,7 +83,8 @@ const trendlineXml = t => tag('c:trendline', {}, (t.name ? tag('c:name', {}, xml
   + (t.type !== 'movingAvg' && t.forward ? val('forward', t.forward) : '') + (t.type !== 'movingAvg' && t.backward ? val('backward', t.backward) : '')
   + (INTERCEPT_TYPES.has(t.type) && t.intercept != null ? val('intercept', t.intercept) : '')
   + (t.dispEq || t.dispRSqr ? val('dispRSqr', Number(t.dispRSqr)) + val('dispEq', Number(t.dispEq))
-    + tag('c:trendlineLbl', {}, tag('c:numFmt', { formatCode: t.labelFormat || 'General', sourceLinked: 0 })) : ''));
+    + tag('c:trendlineLbl', {}, (t.labelPos ? tag('c:layout', {}, tag('c:manualLayout', {}, val('xMode', 'edge') + val('yMode', 'edge') + val('x', t.labelPos.x) + val('y', t.labelPos.y))) : '')
+      + tag('c:numFmt', { formatCode: t.labelFormat || 'General', sourceLinked: 0 })) : ''));
 
 /** Format ▸ Shape Effects: a:effectLst for an element's outer shadow or glow. */
 const effectList = e => e?.shadow || e?.glow ? tag('a:effectLst', {}, (e.glow ? tag('a:glow', { rad: 63500 }, tag('a:srgbClr', { val: e.glow.slice(1).toUpperCase() }, tag('a:alpha', { val: 60000 }))) : '')

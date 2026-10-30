@@ -726,7 +726,7 @@ function renderChartContent(data, chart, width, height) {
     parts.push(marks.svg);
     if (marks.label) trendLabels.push(marks.label);
   };
-  const trendLabelText = () => trendLabelsSvg(trendLabels, { size: 11, color: 'var(--ink-2)' }, plot);
+  const trendLabelText = () => trendLabelsSvg(trendLabels, { size: 11, color: 'var(--ink-2)' }, plot, W, H);
 
   // Where the axis spans more than a double can hold, measure in halves so the fraction stays finite. A value far
   // outside fixed bounds (the largest double over an axis of 0 to 1) is held to a few plot heights past the edge,
@@ -1893,7 +1893,7 @@ function renderStyledCartesian(data, chart, width, height) {
   });
   parts.push('</g>');
   // Interior tick labels remain readable over bars, areas and other marks.
-  parts.push(axisLabels.join(''), outsideLabels.join(''), trendLabelsSvg(trendLabels, a.yStyle, plot));
+  parts.push(axisLabels.join(''), outsideLabels.join(''), trendLabelsSvg(trendLabels, a.yStyle, plot, W, H));
   for (const l of bubbleLabels) {
     // A label of the app's own that fits in its bubble takes the ink that reads on the bubble's colour.
     const base = l.labels.style, pos = l.labels.position;
@@ -2391,15 +2391,16 @@ function trendlineMarks(points, trend, { j, name, color, place, straight = true,
   const lines = [trend.dispEq && trendEquation(fit, format), trend.dispRSqr && r2 && [{ text: r2 }]].filter(Boolean);
   // The label sits by the end of the line that lies in the plot.
   const end = at.filter(p => p && p[0] >= bounds.x - .5 && p[0] <= bounds.x + bounds.w + .5 && p[1] >= bounds.y - .5 && p[1] <= bounds.y + bounds.h + .5).at(-1);
-  return { svg, label: lines.length && end ? { lines, x: end[0], y: end[1], j, path: at.filter(Boolean) } : null };
+  return { svg, label: lines.length && end ? { lines, x: end[0], y: end[1], j, path: at.filter(Boolean), pos: trend.labelPos } : null };
 }
 
 /**
  * Trendline labels: each by its line's end, above it or else below it, or failing both in a corner of the
  * plot: the first of those places that crosses no trendline and no label drawn before it (or the one that
- * crosses least), kept inside the plot. An exponent is set small and raised.
+ * crosses least), kept inside the plot. A label dragged somewhere (labelPos) stays there, kept inside the
+ * W × H chart. An exponent is set small and raised.
  */
-function trendLabelsSvg(labels, style, plot) {
+function trendLabelsSvg(labels, style, plot, W, H) {
   const size = style.size, lineH = size * 1.25, rise = size * .4;
   const placed = [];
   // Points every few pixels along each trendline, to tell whether a place for a label lies over one.
@@ -2415,8 +2416,8 @@ function trendLabelsSvg(labels, style, plot) {
     const places = [hold(l.x, l.y - h - 6), hold(l.x, l.y + 6), hold(left, high), hold(right, high), hold(left, low), hold(right, low)];
     const cost = ({ right: r, top: t }) => along.filter(([x, y]) => x > r - w - 3 && x < r + 3 && y > t - 3 && y < t + h + 3).length
       + 1000 * placed.filter(p => r - w < p.right && r > p.right - p.w && t < p.top + p.h && t + h > p.top).length;
-    const costs = places.map(cost), best = places[costs.indexOf(Math.min(...costs))];
-    const { right: end, top } = best;
+    const best = () => { const costs = places.map(cost); return places[costs.indexOf(Math.min(...costs))]; };
+    const { right: end, top } = l.pos ? { right: Math.min(W, Math.max(w, l.pos.x * W + w)), top: Math.min(H - h, Math.max(0, l.pos.y * H)) } : best();
     placed.push({ right: end, w, top, h });
     const font = `${style.font ? ` font-family="${esc(fontStack(style.font))}"` : ''} font-size="${f(size)}"${style.bold ? ' font-weight="700"' : ''}${style.italic ? ' font-style="italic"' : ''} fill="${esc(style.color)}"`;
     const text = l.lines.map((runs, k) => {
@@ -2428,7 +2429,8 @@ function trendLabelsSvg(labels, style, plot) {
       }).join('');
       return `<text x="${f(end)}" y="${f(top + (k + .8) * lineH)}" text-anchor="end"${font}>${spans}</text>`;
     }).join('');
-    return `<g class="chart-trendline-label" data-el="trendlineLabel" data-series="${l.j}">${text}</g>`;
+    // Where it sits, for a drag to move it from (see chart-format-pane.js).
+    return `<g class="chart-trendline-label" data-el="trendlineLabel" data-series="${l.j}" data-left="${f(end - w)}" data-top="${f(top)}">${text}</g>`;
   }).join('');
 }
 

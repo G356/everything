@@ -129,10 +129,45 @@ export function createChartUi(ctx) {
     if (e.button !== 0 || e.target.closest('.chart-tool, .chart-resize, .chart-title-editor')) return;
     const hit = chartAt(e.target);
     if (!hit) return;
+    // A trendline label in the selected chart moves where it is dragged, rather than the chart.
+    const label = hit.chart.id === chartId && e.target.closest('[data-el="trendlineLabel"]');
+    if (label && !ctx.wb.sheet(ctx.sheetId())?.protected) { dragTrendLabel(e, label); return; }
     const previous = hit.chart.id === chartId ? element : null;
     const key = elementForNode(e.target, previous);
     // The grid selects the chart on the same press; the element follows once it has.
     setTimeout(() => { if (chartId !== hit.chart.id) chartSelected(hit.chart.id); if (element !== key) setElement(key); }, 0);
+  }
+  /** A trendline label follows the pointer; where it is let go becomes its place (labelPos), until Reset Position. */
+  function dragTrendLabel(e, label) {
+    e.preventDefault();
+    e.stopPropagation();
+    const j = +label.getAttribute('data-series'), key = `trendlineLabel:${j}`;
+    if (element !== key) setElement(key);
+    const svg = label.closest('svg'), [, , vw, vh] = (svg.getAttribute('viewBox') || '').split(/[\s,]+/).map(Number), rect = svg.getBoundingClientRect();
+    const view = { width: vw || rect.width || 1, height: vh || rect.height || 1 };
+    const sx = rect.width / view.width || 1, sy = rect.height / view.height || 1;
+    const left = Number(label.getAttribute('data-left')), top = Number(label.getAttribute('data-top'));
+    let dx = 0, dy = 0;
+    const move = ev => {
+      dx = (ev.clientX - e.clientX) / sx;
+      dy = (ev.clientY - e.clientY) / sy;
+      label.setAttribute('transform', `translate(${dx} ${dy})`);
+      syncOverlay();
+    };
+    const end = ev => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
+      label.removeAttribute('transform');
+      const chart = activeChart(ctx), clamp = v => Math.min(1, Math.max(0, v));
+      // A press that barely moves only selects the label.
+      if (ev.type === 'pointercancel' || !chart || Math.hypot(dx * sx, dy * sy) < 3) { syncOverlay(); return; }
+      const patch = trendlinePatch(chart, j, { labelPos: { x: clamp((left + dx) / view.width), y: clamp((top + dy) / view.height) } }, seriesCountOf(ctx.wb, ctx.sheetId(), chart));
+      if (patch) ctx.run('chart', { action: 'patch', patch, label: 'Move trendline label' });
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
   }
   function onDoubleClick(e) {
     const hit = chartAt(e.target);
@@ -333,24 +368,27 @@ export function createChartUi(ctx) {
     const pointIndex = /^point:\d+:(\d+)$/.exec(key)?.[1];
     const ringColor = pointIndex != null && chart.type === 'donut' && ringCountOf(ctx.wb, ctx.sheetId(), chart) > 1
       ? (a.pointColors?.[+seriesIndex] || []).find(p => p.index === +pointIndex)?.color : null;
-    const seriesColor = pointIndex != null && isPieChart(chart) ? ringColor ?? chart.colors?.[+pointIndex] : seriesIndex != null ? chart.colors?.[+seriesIndex] : null;
-    const fill = fills[key] ?? seriesColor;
+    const chosen = pointIndex != null && isPieChart(chart) ? ringColor ?? chart.colors?.[+pointIndex] : seriesIndex != null ? chart.colors?.[+seriesIndex] : null;
+    const fill = fills[key] ?? chosen;
     const line = lines[key] ?? (seriesIndex != null ? (isPieChart(chart) ? a.pie?.stroke : a.bars?.[+seriesIndex]?.stroke ?? a.lines?.[+seriesIndex]?.color) : null);
     const seriesLine = a.lines?.[+seriesIndex] || a.lineDefault;
+    // A series (or slice) on its automatic colour shows the colour it is drawn in, not the first series'.
+    const drawn = seriesIndex == null ? '#4472c4' : pointIndex != null && isPieChart(chart) ? ringColor ?? seriesColor(chart, +pointIndex)
+      : lineOnly ? seriesLine?.color || seriesColor(chart, +seriesIndex) : seriesColor(chart, +seriesIndex);
     const width = lineWidths[key] ?? (seriesIndex != null ? (isPieChart(chart) ? a.pie?.strokeWidth : a.bars?.[+seriesIndex]?.strokeWidth ?? (lineOnly ? seriesLine?.width : null)) : null);
     const parts = [];
     if (!lineOnly && !/^(xTitle|yTitle|dataLabels)/.test(key)) {
       const kind = fill === 'none' ? 'none' : fill ? 'solid' : 'auto';
       parts.push(el('h3.chart-pane-sub', {}, 'Fill'),
-        choice('Fill', kind, [['auto', 'Automatic'], ['none', 'No fill'], ['solid', 'Solid fill']], v => format({ fill: v === 'none' ? 'none' : v === 'solid' ? (fill && fill !== 'none' ? fill : '#4472c4') : null })),
+        choice('Fill', kind, [['auto', 'Automatic'], ['none', 'No fill'], ['solid', 'Solid fill']], v => format({ fill: v === 'none' ? 'none' : v === 'solid' ? (fill && fill !== 'none' ? fill : drawn) : null })),
         kind === 'solid' ? color('Fill Color', fill, v => format({ fill: v })) : null);
     }
     if (chart.appearance && !/^(xTitle|yTitle|dataLabels|point)/.test(key)) {
       const kind = line === 'none' ? 'none' : line ? 'solid' : 'auto';
       parts.push(el('h3.chart-pane-sub', {}, lineOnly && seriesIndex != null ? 'Line' : 'Border'),
         choice(lineOnly && seriesIndex != null ? 'Line' : 'Border', kind, [['auto', 'Automatic'], ['none', lineOnly ? 'No line' : 'No line'], ['solid', 'Solid line']],
-          v => format({ outline: v === 'none' ? 'none' : v === 'solid' ? (line && line !== 'none' ? line : '#595959') : null })),
-        kind === 'solid' || (lineOnly && seriesIndex != null) ? color('Line Color', line && line !== 'none' ? line : '#4472c4', v => format({ outline: v })) : null,
+          v => format({ outline: v === 'none' ? 'none' : v === 'solid' ? (line && line !== 'none' ? line : lineOnly && seriesIndex != null ? drawn : '#595959') : null })),
+        kind === 'solid' || (lineOnly && seriesIndex != null) ? color('Line Color', line && line !== 'none' ? line : lineOnly && seriesIndex != null ? drawn : '#4472c4', v => format({ outline: v })) : null,
         // The width the line is drawn at, in points as Excel gives it; a title's or legend's border keeps no width of its own.
         key === 'title' || key === 'legend' ? null : number('Width (pt)', Number.isFinite(width) ? Math.round(width * 3 / 4 * 100) / 100 : null,
           v => { if (v != null && v >= 0) format({ outlineWidth: Math.round(v * 4 / 3 * 100) / 100 }); }, { min: 0, max: 20, step: 0.25, placeholder: '' }));
@@ -478,7 +516,9 @@ export function createChartUi(ctx) {
     return [section('Label Options',
       checkbox('Display Equation on chart', t.dispEq, on => set({ dispEq: on })),
       checkbox('Display R-squared value on chart', t.dispRSqr, on => set({ dispRSqr: on })),
-      text('Number Format', t.labelFormat || 'General', v => set({ labelFormat: v.trim() || undefined })))];
+      text('Number Format', t.labelFormat || 'General', v => set({ labelFormat: v.trim() || undefined })),
+      // A label dragged somewhere goes back to the place the chart finds for it.
+      t.labelPos ? el('button.btn.btn-sm', { type: 'button', onclick: () => set({ labelPos: undefined }) }, 'Reset Position') : null)];
   }
 
   function options(chart, key) {

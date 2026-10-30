@@ -130,6 +130,16 @@ const text = node => node?.text || '';
 const flag = (node, name) => !!child(node, name) && ['1', 'true'].includes(val(node, name) ?? 'true');
 
 /**
+ * Where a trendline label was moved to, from its c:manualLayout: placed by its edges, as the app writes it.
+ * Excel's own offset (factor mode) is measured from a spot only Excel lays out, so that label keeps the app's.
+ */
+function trendLabelPos(m) {
+  if (!m || val(m, 'xMode') !== 'edge' || val(m, 'yMode') !== 'edge') return undefined;
+  const x = number(m, 'x'), y = number(m, 'y');
+  return x != null && y != null ? { x, y } : undefined;
+}
+
+/**
  * A series' trendline (its first c:trendline) as the chart keeps it (see trendline.js), or false where it
  * has none. `lineColor` reads the colour of its a:ln.
  */
@@ -142,6 +152,7 @@ function trendlineOf(series, lineColor) {
     forward: number(t, 'forward'), backward: number(t, 'backward'), intercept: number(t, 'intercept'),
     dispEq: flag(t, 'dispEq'), dispRSqr: flag(t, 'dispRSqr'), name: text(child(t, 'name')),
     labelFormat: path(t, 'trendlineLbl', 'numFmt')?.attrs.formatCode,
+    labelPos: trendLabelPos(path(t, 'trendlineLbl', 'layout', 'manualLayout')),
     ...(color && color !== 'none' ? { color } : {}),
     ...(Number(ln?.attrs.w) > 0 ? { width: Number(ln.attrs.w) / 9525 } : {}),
     dash: val(ln, 'prstDash'),
