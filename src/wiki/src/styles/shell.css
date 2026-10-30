@@ -211,6 +211,8 @@
     left: 0;
     bottom: 0;
     width: min(320px, 86vw);
+    /* Keep the drawer's background under the status bar but its contents clear of it. */
+    padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
     visibility: visible;
     transform: translateX(0);
     transition: transform 220ms var(--ease);

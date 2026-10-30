@@ -284,7 +284,7 @@ button.page-big-icon:hover { background: var(--bg-hover); }
 .thread-actions { display: flex; justify-content: flex-end; }
 .comments-empty { color: var(--text-3); font-size: 13px; padding: 20px 16px; margin: 0; }
 @media (max-width: 760px) {
-  .comments-panel { position: fixed; inset: 0; z-index: 110; width: auto; border-left: 0; }
+  .comments-panel { position: fixed; inset: env(safe-area-inset-top, 0px) 0 0; z-index: 110; width: auto; border-left: 0; padding-bottom: env(safe-area-inset-bottom, 0px); }
 }
 
 /* Page history */
