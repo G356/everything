@@ -393,6 +393,13 @@ export function createChartUi(ctx) {
         key === 'title' || key === 'legend' ? null : number('Width (pt)', Number.isFinite(width) ? Math.round(width * 3 / 4 * 100) / 100 : null,
           v => { if (v != null && v >= 0) format({ outlineWidth: Math.round(v * 4 / 3 * 100) / 100 }); }, { min: 0, max: 20, step: 0.25, placeholder: '' }));
     }
+    // A line on every side of the plot, as Format Plot Area's border draws it, offered where an axis line is
+    // set: it starts in this axis line's colour and width.
+    if (chart.appearance && AXIS_KEYS.includes(key)) {
+      const boxed = a.plotStroke !== 'none' && !!(a.plotStroke || a.plotStrokeWidth != null || a.plotStrokeDash);
+      parts.push(checkbox('Box around plot area', boxed, on => apply(elementFormatPatch(chart, 'plotArea', on
+        ? { outline: line && line !== 'none' ? line : '#595959', outlineWidth: Number.isFinite(width) ? width : null } : { outline: 'none' }), 'Box around plot area')));
+    }
     return parts.length ? section('Fill & Line', parts) : null;
   }
 
